@@ -763,7 +763,7 @@ function bindEvents() {
     else mapView.closePopup();
   });
   darkQuery.addEventListener('change', applyTheme);
-  wideQuery.addEventListener('change', () => setSheet(wideQuery.matches ? 'half' : 'peek', false));
+  wideQuery.addEventListener('change', () => setSheet(wideQuery.matches ? 'full' : 'peek', false));
   let resizeTimer = 0;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
@@ -819,7 +819,7 @@ function init() {
   });
   renderAll();
   initSheet();
-  setSheet(wideQuery.matches ? 'half' : 'peek', false);
+  setSheet(wideQuery.matches ? 'full' : 'peek', false);
   bindEvents();
   updateClearButton();
   locate(true);

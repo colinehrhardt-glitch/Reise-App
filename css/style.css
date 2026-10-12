@@ -398,7 +398,7 @@ svg {
   align-items: center;
   gap: 8px;
   min-height: 44px;
-  max-width: calc(100% - 2 * var(--gutter) - 120px);
+  max-width: calc(100% - 2 * var(--gutter) - 2 * var(--safe-left));
   padding: 0 18px;
   border-radius: 22px;
   background: var(--accent);
@@ -467,7 +467,7 @@ svg {
   position: fixed;
   z-index: 30;
   right: calc(var(--gutter) + var(--safe-right));
-  top: calc(var(--top-offset) + var(--search-h) + 12px);
+  top: calc(var(--top-offset) + var(--search-h) + 68px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -510,7 +510,7 @@ svg {
   position: fixed;
   z-index: 35;
   right: calc(var(--gutter) + var(--safe-right) + 58px);
-  top: calc(var(--top-offset) + var(--search-h) + 12px);
+  top: calc(var(--top-offset) + var(--search-h) + 68px);
   width: min(240px, calc(100vw - 2 * var(--gutter) - 70px));
   padding: 14px 16px 10px;
   background: var(--surface);
@@ -941,7 +941,7 @@ svg {
 
 .leaflet-popup-content {
   margin: 0;
-  width: min(290px, calc(100vw - 64px)) !important;
+  width: min(300px, calc(100vw - 48px)) !important;
   font-size: 15px;
   line-height: 1.4;
 }
@@ -1087,6 +1087,9 @@ svg {
 
 .btn--primary {
   width: 100%;
+  font-size: 14px;
+  padding: 0 12px;
+  line-height: 1.2;
   background: var(--accent);
   color: var(--on-accent) !important;
 }
@@ -1228,8 +1231,17 @@ svg {
   display: none;
 }
 
-.switch-row,
 .select-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px 0 4px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.switch-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1274,9 +1286,10 @@ svg {
 }
 
 .select {
-  min-height: 44px;
-  max-width: 60%;
+  width: 100%;
+  min-height: 46px;
   padding: 0 36px 0 14px;
+  color: var(--text);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
   background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3C/svg%3E") no-repeat right 10px center / 18px;
@@ -1307,9 +1320,9 @@ svg {
 
 .segmented__btn {
   min-height: 44px;
-  padding: 0 6px;
+  padding: 0 2px;
   border-radius: 11px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-2);
   transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
@@ -1394,7 +1407,8 @@ svg {
 
 .toast__action {
   min-height: 40px;
-  padding: 0 12px;
+  padding: 0 10px;
+  font-size: 14px;
   border-radius: 10px;
   font-weight: 700;
   color: #66d9e8;
@@ -1463,7 +1477,7 @@ svg {
 @media (min-width: 768px) {
   :root {
     --gutter: 16px;
-    --panel-w: 400px;
+    --panel-w: 360px;
     --map-left: calc(var(--panel-w) + var(--gutter));
     --sheet-top: calc(var(--top-offset) + var(--search-h) + 12px);
   }
@@ -1485,9 +1499,9 @@ svg {
   }
 
   .area-btn {
-    top: var(--top-offset);
-    left: calc(50% + (var(--panel-w) + var(--gutter)) / 2);
-    max-width: calc(100% - var(--panel-w) - 3 * var(--gutter) - 140px);
+    top: calc(var(--top-offset) + 5px);
+    left: calc(var(--panel-w) + 2 * var(--gutter) + (100% - var(--panel-w) - 4 * var(--gutter) - 48px) / 2);
+    max-width: calc(100% - var(--panel-w) - 5 * var(--gutter) - 48px);
   }
 
   .fab-stack,
@@ -1497,6 +1511,12 @@ svg {
 
   .toasts {
     bottom: calc(var(--gutter) + var(--safe-bottom) + 24px);
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --panel-w: 400px;
   }
 }
 
