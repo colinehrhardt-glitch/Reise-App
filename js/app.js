@@ -276,7 +276,7 @@ function renderSources() {
     el('dt', { text: t('about.map') }),
     el('dd', {}, '© ', link('https://www.openstreetmap.org/copyright', t('attribution.osm'))),
     el('dt', { text: t('about.tiles') }),
-    el('dd', {}, '© ', link('https://carto.com/attributions', 'CARTO')),
+    el('dd', {}, link('https://openfreemap.org', 'OpenFreeMap'), ', © ', link('https://www.openmaptiles.org', 'OpenMapTiles')),
     el('dt', { text: t('about.search') }),
     el('dd', {}, link('https://nominatim.org', 'Nominatim')),
     el('dt', { text: t('about.places') }),
@@ -287,7 +287,7 @@ function renderSources() {
 }
 
 function renderAttribution() {
-  mapView.setAttribution(`&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">${t('attribution.osm')}</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>`);
+  mapView.setAttribution(`&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">${t('attribution.osm')}</a>`);
 }
 
 function layerRow({ title, desc, color, iconName, checked, onChange, extra = null }) {

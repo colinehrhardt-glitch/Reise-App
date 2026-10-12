@@ -3,7 +3,7 @@
 Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte.
 
 ## Funktionen
-- Vollbild-Karte (OSM-Daten, Kartenstil CARTO Voyager / Dark Matter), Start am eigenen Standort
+- Vollbild-Karte (OSM-Daten, Vektorkarte von OpenFreeMap, Rückfall auf OSM-Kacheln), Start am eigenen Standort
 - Ortssuche (Nominatim) mit Trefferliste
 - „In diesem Bereich suchen“: Hotels, Hostels, Gästehäuser, Apartments, Motels (Overpass API)
 - Filter, Sortierung (Empfohlen, Sterne, Entfernung), Marker-Clustering, ausziehbare Ergebnisliste
@@ -28,4 +28,4 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/storage.js` – localStorage
 
 ## Datenquellen
-Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil © CARTO, Fotos Wikimedia Commons. Kostenlose Dienste ohne API-Schlüssel – bitte schonend nutzen. Bewertungen und echte Preise gibt es erst mit Partner-Anbindung (Stufe 6).
+Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap © OpenMapTiles, Fotos Wikimedia Commons. Kostenlose Dienste ohne API-Schlüssel – bitte schonend nutzen. Bewertungen und echte Preise gibt es erst mit Partner-Anbindung (Stufe 6).

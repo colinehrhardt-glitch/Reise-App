@@ -38,10 +38,13 @@ export const LAYERS = {
 
 export const FAVORITE_COLOR = '#e64980';
 
-const TILES = {
-  light: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-  dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+const VECTOR_STYLES = {
+  light: 'https://tiles.openfreemap.org/styles/liberty',
+  dark: 'https://tiles.openfreemap.org/styles/dark'
 };
+const RASTER_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const VECTOR_TIMEOUT = 12000;
+const VECTOR_CREDIT = '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> &copy; <a href="https://www.openmaptiles.org" target="_blank" rel="noopener">OpenMapTiles</a>';
 const WORLD_VIEW = { center: [25, 10], zoom: 2 };
 const FOCUS_ZOOM = 17;
 const UNCLUSTER_ZOOM = 17;
@@ -49,8 +52,9 @@ const PIN_OFFSET = -32;
 const POI_OFFSET = -12;
 
 let map = null;
-let tiles = null;
-let tileTheme = 'light';
+let base = null;
+let baseTheme = null;
+let attributionLabel = '';
 let cluster = null;
 let favoritesLayer = null;
 let userMarker = null;
@@ -152,33 +156,84 @@ export function initMap(container, options = {}) {
   return map;
 }
 
+function vectorSupported() {
+  if (typeof window.maplibregl === 'undefined' || typeof L.maplibreGL !== 'function') return false;
+  try {
+    const canvas = document.createElement('canvas');
+    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'));
+  } catch {
+    return false;
+  }
+}
+
+function updateMapThemeAttr() {
+  const container = map.getContainer();
+  container.dataset.mapTheme = base && base.kind === 'raster' ? `raster-${baseTheme}` : baseTheme;
+}
+
+function useRaster() {
+  if (base && base.kind === 'raster') return;
+  if (base) map.removeLayer(base.layer);
+  const layer = L.tileLayer(RASTER_URL, { maxZoom: 20, maxNativeZoom: 19, crossOrigin: true }).addTo(map);
+  layer.bringToBack();
+  base = { kind: 'raster', layer };
+  updateMapThemeAttr();
+  renderAttribution();
+}
+
+function createVector(theme) {
+  const layer = L.maplibreGL({ style: VECTOR_STYLES[theme], attributionControl: false, interactive: false });
+  layer.addTo(map);
+  const gl = layer.getMaplibreMap();
+  const entry = { kind: 'vector', layer, gl, loaded: false, theme };
+  base = entry;
+  const timer = setTimeout(() => {
+    if (!entry.loaded && base === entry) useRaster();
+  }, VECTOR_TIMEOUT);
+  gl.on('load', () => {
+    entry.loaded = true;
+    clearTimeout(timer);
+  });
+  gl.on('error', (event) => {
+    const url = event && event.error && event.error.url ? String(event.error.url) : '';
+    if (base !== entry || !url.includes('/styles/')) return;
+    if (entry.theme === 'dark' && entry.loaded) {
+      entry.theme = 'light';
+      gl.setStyle(VECTOR_STYLES.light);
+      return;
+    }
+    clearTimeout(timer);
+    useRaster();
+  });
+}
+
 export function setMapTheme(dark) {
   if (!map) return;
   const theme = dark ? 'dark' : 'light';
-  if (tiles && theme === tileTheme) return;
-  tileTheme = theme;
-  const next = L.tileLayer(TILES[theme], {
-    subdomains: 'abcd',
-    maxZoom: 20,
-    crossOrigin: true
-  });
-  next.addTo(map);
-  next.bringToBack();
-  if (tiles) {
-    const previous = tiles;
-    next.once('load', () => map.removeLayer(previous));
-    setTimeout(() => {
-      if (map.hasLayer(previous)) map.removeLayer(previous);
-    }, 4000);
+  if (base && theme === baseTheme) return;
+  baseTheme = theme;
+  if (!base) {
+    if (vectorSupported()) createVector(theme);
+    else useRaster();
+  } else if (base.kind === 'vector') {
+    base.theme = theme;
+    base.gl.setStyle(VECTOR_STYLES[theme]);
   }
-  tiles = next;
-  map.getContainer().dataset.mapTheme = theme;
+  updateMapThemeAttr();
+  renderAttribution();
 }
 
-export function setAttribution(html) {
+function renderAttribution() {
+  if (!map || !attributionLabel) return;
+  const html = base && base.kind === 'vector' ? `${VECTOR_CREDIT} ${attributionLabel}` : attributionLabel;
   if (currentAttribution) map.attributionControl.removeAttribution(currentAttribution);
   currentAttribution = html;
   map.attributionControl.addAttribution(html);
+}
+
+export function setAttribution(html) {
+  attributionLabel = html;
+  renderAttribution();
 }
 
 export function setInsets(next) {
