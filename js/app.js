@@ -1,36 +1,85 @@
 import { t, tCount, getLanguage, setLanguage, onLanguageChange, applyTranslations, LANGUAGES, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
-import { searchPlaces, fetchAccommodations, OVERPASS_LIMIT, ACCOMMODATION_TYPES } from './api.js';
+import { searchPlaces, fetchCategories, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
 const FAVORITE_SORTS = ['added', 'name', 'type', 'distance'];
+const RESULT_SORTS = ['recommended', 'stars', 'distance'];
 const THEMES = ['auto', 'light', 'dark'];
 const SHEET_ORDER = ['peek', 'half', 'full'];
+const PHOTO_KINDS = ['commons', 'wikidata', 'url'];
 const wideQuery = window.matchMedia('(min-width: 768px)');
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
 const dom = {};
 const state = {
   places: [],
+  poi: {},
   searched: false,
   filter: 'all',
   origin: null,
-  loading: false,
+  areaLoading: false,
+  pending: 0,
   locating: false,
   user: null,
-  popupPlace: null,
+  popupItem: null,
   sheet: 'peek',
   searchToken: 0,
   favorites: sanitizeFavorites(load('favorites', {})),
   showFavorites: load('showFavorites', true) !== false,
   favoriteSort: pick(load('favoriteSort', 'added'), FAVORITE_SORTS, 'added'),
-  theme: pick(load('theme', 'auto'), THEMES, 'auto')
+  resultSort: pick(load('resultSort', 'recommended'), RESULT_SORTS, 'recommended'),
+  theme: pick(load('theme', 'auto'), THEMES, 'auto'),
+  layers: sanitizeLayers(load('layers', {}))
 };
 
 function pick(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback;
+}
+
+function sanitizeLayers(raw) {
+  const layers = { accommodation: !raw || raw.accommodation !== false };
+  for (const category of POI_CATEGORIES) layers[category] = Boolean(raw && raw[category] === true);
+  return layers;
+}
+
+function text(value, max = 300) {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : null;
+}
+
+function sanitizeFacts(raw) {
+  const facts = {};
+  if (!raw || typeof raw !== 'object') return facts;
+  for (const key of ['rooms', 'beds']) {
+    if (Number.isInteger(raw[key]) && raw[key] > 0) facts[key] = raw[key];
+  }
+  for (const key of ['checkIn', 'checkOut']) {
+    const value = text(raw[key], 20);
+    if (value) facts[key] = value;
+  }
+  if (raw.wifi === 'yes' || raw.wifi === 'free') facts.wifi = raw.wifi;
+  if (raw.wheelchair === 'yes' || raw.wheelchair === 'limited') facts.wheelchair = raw.wheelchair;
+  if (raw.nonSmoking === true) facts.nonSmoking = true;
+  return facts;
+}
+
+function sanitizeDescription(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const result = {};
+  for (const key of ['de', 'en', 'es', 'default']) {
+    const value = text(raw[key]);
+    if (value) result[key] = value;
+  }
+  return Object.keys(result).length ? result : null;
+}
+
+function sanitizePhoto(raw) {
+  if (!raw || !PHOTO_KINDS.includes(raw.kind) || typeof raw.value !== 'string') return null;
+  if (raw.kind === 'url' && !/^https:\/\//i.test(raw.value)) return null;
+  if (raw.kind === 'wikidata' && !/^Q\d+$/.test(raw.value)) return null;
+  return { kind: raw.kind, value: raw.value.slice(0, 300) };
 }
 
 function sanitizeFavorites(raw) {
@@ -41,14 +90,20 @@ function sanitizeFavorites(raw) {
     if (!Number.isFinite(item.lat) || !Number.isFinite(item.lon)) continue;
     result[item.id] = {
       id: item.id,
+      kind: 'accommodation',
       type: item.type,
-      name: typeof item.name === 'string' ? item.name : null,
+      name: text(item.name),
       lat: item.lat,
       lon: item.lon,
       stars: item.stars && Number.isFinite(item.stars.count) ? { count: item.stars.count, superior: Boolean(item.stars.superior) } : null,
-      address: typeof item.address === 'string' ? item.address : null,
+      address: text(item.address),
+      city: text(item.city),
       website: typeof item.website === 'string' && /^https?:\/\//i.test(item.website) ? item.website : null,
-      phone: typeof item.phone === 'string' ? item.phone : null,
+      phone: text(item.phone, 60),
+      email: typeof item.email === 'string' && /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(item.email) ? item.email : null,
+      description: sanitizeDescription(item.description),
+      photo: sanitizePhoto(item.photo),
+      facts: sanitizeFacts(item.facts),
       addedAt: Number.isFinite(item.addedAt) ? item.addedAt : 0
     };
   }
@@ -77,6 +132,14 @@ function icon(name) {
   return template.content.firstElementChild;
 }
 
+function link(href, label, className = null) {
+  return el('a', { class: className, href, target: '_blank', rel: 'noopener noreferrer', text: label });
+}
+
+function formatNumber(n) {
+  return new Intl.NumberFormat(getLanguage()).format(n);
+}
+
 function typeLabel(type, many = false) {
   return t(`types.${type}.${many ? 'many' : 'one'}`);
 }
@@ -85,8 +148,12 @@ function placeName(place) {
   return place.name || t('place.unnamed');
 }
 
+function dot(color, iconName) {
+  return el('span', { class: 'type-dot', style: `--c:${color}` }, icon(iconName));
+}
+
 function typeDot(type) {
-  return el('span', { class: 'type-dot', style: `--c:${mapView.TYPES[type]?.color || mapView.FAVORITE_COLOR}` }, icon(type));
+  return dot(mapView.TYPES[type]?.color || mapView.FAVORITE_COLOR, type);
 }
 
 function starString(stars) {
@@ -117,8 +184,8 @@ function isFavorite(id) {
 function errorMessage(error) {
   const code = error && error.code ? error.code : 'server';
   const key = `errors.${code}`;
-  const text = t(key);
-  return text === key ? t('errors.server') : text;
+  const message = t(key);
+  return message === key ? t('errors.server') : message;
 }
 
 function toast(message, { type = 'info', action = null, duration = 4000 } = {}) {
@@ -152,12 +219,17 @@ function toast(message, { type = 'info', action = null, duration = 4000 } = {}) 
   timer = setTimeout(dismiss, duration);
 }
 
+function isDark() {
+  return state.theme === 'dark' || (state.theme === 'auto' && darkQuery.matches);
+}
+
 function applyTheme() {
   const root = document.documentElement;
   if (state.theme === 'auto') delete root.dataset.theme;
   else root.dataset.theme = state.theme;
-  const dark = state.theme === 'dark' || (state.theme === 'auto' && darkQuery.matches);
+  const dark = isDark();
   document.querySelector('meta[name="theme-color"]').setAttribute('content', dark ? '#0a1416' : '#e9efef');
+  mapView.setMapTheme(dark);
 }
 
 function renderSegmented(container, items, active, onSelect) {
@@ -194,55 +266,168 @@ function renderThemeSwitch() {
   );
 }
 
-function renderSortOptions() {
-  dom.favoritesSort.replaceChildren(...FAVORITE_SORTS.map((value) => el('option', {
-    value,
-    text: t(`favorites.sort.${value}`)
-  })));
-  dom.favoritesSort.value = state.favoriteSort;
-}
-
-function link(href, text) {
-  return el('a', { href, target: '_blank', rel: 'noopener noreferrer', text });
+function fillSelect(select, values, prefix, active) {
+  select.replaceChildren(...values.map((value) => el('option', { value, text: t(`${prefix}.${value}`) })));
+  select.value = active;
 }
 
 function renderSources() {
   dom.sources.replaceChildren(
     el('dt', { text: t('about.map') }),
     el('dd', {}, '© ', link('https://www.openstreetmap.org/copyright', t('attribution.osm'))),
+    el('dt', { text: t('about.tiles') }),
+    el('dd', {}, '© ', link('https://carto.com/attributions', 'CARTO')),
     el('dt', { text: t('about.search') }),
     el('dd', {}, link('https://nominatim.org', 'Nominatim')),
     el('dt', { text: t('about.places') }),
-    el('dd', {}, link('https://overpass-api.de', 'Overpass API'))
+    el('dd', {}, link('https://overpass-api.de', 'Overpass API')),
+    el('dt', { text: t('about.photos') }),
+    el('dd', {}, link('https://commons.wikimedia.org', 'Wikimedia Commons'), ', ', link('https://www.wikidata.org', 'Wikidata'))
   );
 }
 
 function renderAttribution() {
-  mapView.setAttribution(`&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">${t('attribution.osm')}</a>`);
+  mapView.setAttribution(`&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">${t('attribution.osm')}</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>`);
 }
 
-function renderLegend() {
-  const items = ACCOMMODATION_TYPES.map((type) => el('li', { class: 'legend__item' }, typeDot(type), el('span', { text: typeLabel(type) })));
-  items.push(el('li', { class: 'legend__item' },
-    el('span', { class: 'type-dot', style: `--c:${mapView.FAVORITE_COLOR}` }, icon('heart')),
-    el('span', { text: t('legend.favorite') })));
-  dom.legendList.replaceChildren(...items);
+function layerRow({ title, desc, color, iconName, checked, onChange, extra = null }) {
+  const input = el('input', { type: 'checkbox', class: 'switch' });
+  input.checked = checked;
+  input.addEventListener('change', () => onChange(input.checked));
+  return el('label', { class: 'layer-row' },
+    dot(color, iconName),
+    el('span', { class: 'layer-row__text' },
+      el('span', { class: 'layer-row__title', text: title }),
+      desc ? el('span', { class: 'layer-row__desc', text: desc }) : null,
+      extra),
+    input);
 }
 
-function toggleLegend(force) {
-  const open = typeof force === 'boolean' ? force : dom.legend.hidden;
-  dom.legend.hidden = !open;
-  dom.legendBtn.setAttribute('aria-expanded', String(open));
+function renderLayersPanel() {
+  const legend = el('span', { class: 'legend-dots' }, ACCOMMODATION_TYPES.map((type) => el('span', { class: 'legend-dots__item' },
+    el('span', { class: 'chip__dot', style: `--c:${mapView.TYPES[type].color}` }),
+    el('span', { text: typeLabel(type) }))));
+  dom.layersBase.replaceChildren(
+    layerRow({
+      title: t('layers.accommodation'),
+      color: 'var(--accent)',
+      iconName: 'hotel',
+      checked: state.layers.accommodation,
+      extra: legend,
+      onChange: (checked) => {
+        state.layers.accommodation = checked;
+        save('layers', state.layers);
+        mapView.setAccommodationsVisible(checked);
+      }
+    }),
+    layerRow({
+      title: t('layers.favorites'),
+      color: mapView.FAVORITE_COLOR,
+      iconName: 'heart',
+      checked: state.showFavorites,
+      onChange: setShowFavorites
+    })
+  );
+  dom.layersExtra.replaceChildren(...POI_CATEGORIES.map((category) => layerRow({
+    title: t(`layers.${category}`),
+    desc: t(`layers.${category}.desc`),
+    color: mapView.LAYERS[category].color,
+    iconName: category,
+    checked: state.layers[category],
+    onChange: (checked) => setPoiLayer(category, checked)
+  })));
+}
+
+function toggleLayers(force) {
+  const open = typeof force === 'boolean' ? force : dom.layers.hidden;
+  if (open) renderLayersPanel();
+  dom.layers.hidden = !open;
+  dom.layersBtn.setAttribute('aria-expanded', String(open));
+}
+
+function setShowFavorites(checked) {
+  state.showFavorites = checked;
+  save('showFavorites', checked);
+  dom.favoritesToggle.checked = checked;
+  renderMarkers();
+}
+
+function renderPoi(category) {
+  mapView.renderPoiLayer(category, state.poi[category] || [], state.layers[category]);
+}
+
+function setPoiLayer(category, checked) {
+  state.layers[category] = checked;
+  save('layers', state.layers);
+  renderPoi(category);
+  if (checked) loadPoiLayer(category);
+}
+
+function beginRequest() {
+  state.pending += 1;
+  dom.progress.hidden = false;
+}
+
+function endRequest() {
+  state.pending = Math.max(0, state.pending - 1);
+  dom.progress.hidden = state.pending === 0;
+}
+
+function truncatedNotice() {
+  toast(t('results.truncated'), { duration: 6000 });
+}
+
+async function loadPoiLayer(category) {
+  if (mapView.getZoom() < MIN_SEARCH_ZOOM) {
+    toast(t('layers.zoomIn'));
+    return;
+  }
+  beginRequest();
+  try {
+    const data = await fetchCategories([category], mapView.getBounds());
+    state.poi[category] = data[category].items;
+    renderPoi(category);
+    if (data[category].truncated) truncatedNotice();
+  } catch (error) {
+    toast(errorMessage(error), {
+      type: 'error',
+      duration: 8000,
+      action: { label: t('common.retry'), onClick: () => loadPoiLayer(category) }
+    });
+  } finally {
+    endRequest();
+  }
 }
 
 function filteredPlaces() {
   return state.filter === 'all' ? state.places : state.places.filter((place) => place.type === state.filter);
 }
 
-function sortPlaces(places, origin) {
+function placeScore(place) {
+  let score = 0;
+  if (place.stars) score += place.stars.count * 10 + (place.stars.superior ? 3 : 0);
+  if (place.photo) score += 4;
+  if (place.website) score += 3;
+  if (place.phone) score += 2;
+  if (place.address) score += 2;
+  if (place.email) score += 1;
+  if (place.description) score += 1;
+  score += Math.min(3, Object.keys(place.facts || {}).length);
+  return score;
+}
+
+function sortPlaces(places) {
+  const origin = state.origin;
+  const named = (entry) => (entry.place.name ? 0 : 1);
+  const starsOf = (entry) => entry.place.stars?.count || 0;
+  const comparators = {
+    recommended: (a, b) => named(a) - named(b) || b.score - a.score || a.d - b.d,
+    stars: (a, b) => named(a) - named(b) || starsOf(b) - starsOf(a) || b.score - a.score || a.d - b.d,
+    distance: (a, b) => named(a) - named(b) || a.d - b.d
+  };
   return places
-    .map((place) => ({ place, d: distance(origin, place) }))
-    .sort((a, b) => (a.place.name ? 0 : 1) - (b.place.name ? 0 : 1) || a.d - b.d)
+    .map((place) => ({ place, d: origin ? distance(origin, place) : 0, score: placeScore(place) }))
+    .sort(comparators[state.resultSort])
     .map((entry) => entry.place);
 }
 
@@ -260,7 +445,7 @@ function renderChips() {
     },
     value === 'all' ? null : el('span', { class: 'chip__dot', style: `--c:${mapView.TYPES[value].color}` }),
     el('span', { text: label }),
-    state.searched ? el('span', { class: 'chip__count', text: new Intl.NumberFormat(getLanguage()).format(count) }) : null);
+    state.searched ? el('span', { class: 'chip__count', text: formatNumber(count) }) : null);
   };
   dom.chips.replaceChildren(chip('all', t('filter.all')), ...ACCOMMODATION_TYPES.map((type) => chip(type, typeLabel(type, true))));
   dom.chips.scrollLeft = scroll;
@@ -308,7 +493,7 @@ function placeItem(place, reference, context) {
 function renderMarkers() {
   const visible = filteredPlaces();
   mapView.renderResults(visible, isFavorite);
-  const shown = new Set(visible.map((place) => place.id));
+  const shown = new Set(state.layers.accommodation ? visible.map((place) => place.id) : []);
   mapView.renderFavorites(state.showFavorites ? Object.values(state.favorites).filter((place) => !shown.has(place.id)) : []);
 }
 
@@ -320,6 +505,7 @@ function renderResults() {
   else if (!state.places.length) empty = t('results.none');
   else if (!visible.length) empty = t('results.noneFiltered');
   dom.resultsEmpty.textContent = empty;
+  dom.listToolbar.hidden = visible.length < 2;
   dom.resultsList.replaceChildren(...visible.map((place) => placeItem(place, state.origin, 'results')));
   renderChips();
   renderMarkers();
@@ -344,15 +530,15 @@ function sortedFavorites(reference) {
 function renderFavoritesList() {
   const reference = state.user || mapView.getVisibleCenter();
   const list = sortedFavorites(reference);
-  dom.favoritesCount.textContent = list.length ? new Intl.NumberFormat(getLanguage()).format(list.length) : '';
+  dom.favoritesCount.textContent = list.length ? formatNumber(list.length) : '';
   dom.favoritesEmpty.textContent = list.length ? '' : t('favorites.empty');
   dom.favoritesList.replaceChildren(...list.map((place) => placeItem(place, reference, 'favorites')));
   dom.favoritesToggle.checked = state.showFavorites;
 }
 
 function toFavorite(place) {
-  const { id, type, name, lat, lon, stars, address, website, phone } = place;
-  return { id, type, name, lat, lon, stars, address, website, phone, addedAt: Date.now() };
+  const { id, type, name, lat, lon, stars, address, city, website, phone, email, description, photo, facts } = place;
+  return { id, kind: 'accommodation', type, name, lat, lon, stars, address, city, website, phone, email, description, photo, facts, addedAt: Date.now() };
 }
 
 function persistFavorites() {
@@ -413,35 +599,139 @@ function displayHost(url) {
   }
 }
 
-function routeUrl(place) {
-  return `https://www.google.com/maps/dir/?api=1&destination=${place.lat.toFixed(6)},${place.lon.toFixed(6)}`;
+function routeButton(item) {
+  const href = `https://www.google.com/maps/dir/?api=1&destination=${item.lat.toFixed(6)},${item.lon.toFixed(6)}`;
+  return el('a', { class: 'btn btn--primary', href, target: '_blank', rel: 'noopener noreferrer' },
+    icon('route'), el('span', { text: t('place.route') }));
+}
+
+function closeButton() {
+  return el('button', { type: 'button', class: 'popup__close', 'aria-label': t('place.close'), onclick: () => mapView.closePopup() }, icon('close'));
+}
+
+function contactRows(item) {
+  const rows = [];
+  if (item.openingHours) rows.push(popupRow('clock', el('span', { text: item.openingHours })));
+  if (item.address) rows.push(popupRow('pin', el('span', { text: item.address })));
+  if (item.website) rows.push(popupRow('globe', link(item.website, displayHost(item.website))));
+  if (item.phone) rows.push(popupRow('phone', el('a', { href: `tel:${item.phone.replace(/[^\d+]/g, '')}`, text: item.phone })));
+  if (item.email) rows.push(popupRow('mail', el('a', { href: `mailto:${item.email}`, text: item.email })));
+  return rows.length ? el('ul', { class: 'popup__rows' }, rows) : null;
+}
+
+function factChips(list) {
+  return list.length ? el('ul', { class: 'facts' }, list.map((label) => el('li', { class: 'fact', text: label }))) : null;
+}
+
+function accommodationFacts(facts = {}) {
+  const list = [];
+  if (facts.wifi) list.push(t(facts.wifi === 'free' ? 'fact.wifiFree' : 'fact.wifi'));
+  if (facts.checkIn) list.push(t('fact.checkIn', { time: facts.checkIn }));
+  if (facts.checkOut) list.push(t('fact.checkOut', { time: facts.checkOut }));
+  if (facts.rooms) list.push(tCount('fact.rooms', facts.rooms));
+  if (facts.beds) list.push(tCount('fact.beds', facts.beds));
+  if (facts.wheelchair) list.push(t(facts.wheelchair === 'yes' ? 'fact.wheelchair' : 'fact.wheelchairLimited'));
+  if (facts.nonSmoking) list.push(t('fact.nonSmoking'));
+  return list;
+}
+
+function poiFacts(facts = {}) {
+  const list = [];
+  if (facts.allDay) list.push(t('fact.allDay'));
+  if (facts.emergency) list.push(t('fact.emergency'));
+  if (facts.atm) list.push(t('fact.atm'));
+  if (facts.fee) list.push(t(facts.fee === 'yes' ? 'fact.fee' : 'fact.noFee'));
+  if (facts.wheelchair) list.push(t(facts.wheelchair === 'yes' ? 'fact.wheelchair' : 'fact.wheelchairLimited'));
+  return list;
+}
+
+function descriptionFor(place) {
+  if (!place.description) return null;
+  return place.description[getLanguage()] || place.description.default || place.description.en || null;
+}
+
+function priceSection(place) {
+  if (!place.name) return null;
+  const query = [place.name, place.city].filter(Boolean).join(', ');
+  const lang = getLanguage();
+  const booking = `https://www.booking.com/searchresults.html?${new URLSearchParams({ ss: query, lang: { de: 'de', en: 'en-gb', es: 'es' }[lang] || 'en-gb' })}`;
+  const google = `https://www.google.com/travel/search?${new URLSearchParams({ q: query, hl: lang })}`;
+  const button = (href, label) => el('a', { class: 'btn btn--secondary', href, target: '_blank', rel: 'noopener noreferrer', title: t('prices.note') },
+    el('span', { text: label }), icon('external'));
+  return el('div', { class: 'prices' },
+    el('div', { class: 'prices__title' }, icon('tag'), el('span', { text: t('prices.title') })),
+    el('div', { class: 'prices__buttons' }, button(booking, 'Booking.com'), button(google, 'Google')));
+}
+
+async function loadPhoto(item, figure) {
+  let photo = null;
+  try {
+    photo = await fetchPhoto(item.photo);
+  } catch {
+    photo = null;
+  }
+  if (!photo) {
+    figure.remove();
+    mapView.refreshPopup();
+    return;
+  }
+  const img = el('img', { alt: '', decoding: 'async', referrerpolicy: 'no-referrer' });
+  img.addEventListener('load', () => figure.classList.remove('is-loading'));
+  img.addEventListener('error', () => {
+    figure.remove();
+    mapView.refreshPopup();
+  });
+  img.src = photo.src;
+  figure.append(img, el('figcaption', { class: 'popup__credit' }, link(photo.link, t('photo.credit', { source: photo.credit }))));
 }
 
 function popupContent(place) {
-  const rows = [];
-  if (place.address) rows.push(popupRow('pin', el('span', { text: place.address })));
-  if (place.website) rows.push(popupRow('globe', link(place.website, displayHost(place.website))));
-  if (place.phone) rows.push(popupRow('phone', el('a', { href: `tel:${place.phone.replace(/[^\d+]/g, '')}`, text: place.phone })));
-  const color = mapView.TYPES[place.type]?.color;
-  return el('div', { class: 'popup' },
-    el('div', { class: 'popup__head' },
-      el('span', { class: 'type-badge', style: `--c:${color}` }, typeDot(place.type), el('span', { text: typeLabel(place.type) })),
-      heartButton(place),
-      el('button', { type: 'button', class: 'popup__close', 'aria-label': t('place.close'), onclick: () => mapView.closePopup() }, icon('close'))),
-    el('h3', { class: `popup__title${place.name ? '' : ' is-unnamed'}`, text: placeName(place) }),
-    place.stars ? el('div', { class: 'popup__stars' },
-      el('span', { class: 'stars', 'aria-hidden': 'true', text: starString(place.stars) }),
-      el('span', { text: starLabel(place.stars) })) : null,
-    rows.length ? el('ul', { class: 'popup__rows' }, rows) : null,
-    el('a', { class: 'btn btn--primary', href: routeUrl(place), target: '_blank', rel: 'noopener noreferrer' },
-      icon('route'), el('span', { text: t('place.route') })));
+  const figure = place.photo ? el('figure', { class: 'popup__photo is-loading' }) : null;
+  const description = descriptionFor(place);
+  const content = el('div', { class: 'popup' },
+    figure,
+    el('div', { class: 'popup__body' },
+      el('div', { class: 'popup__head' },
+        el('span', { class: 'type-badge', style: `--c:${mapView.TYPES[place.type]?.color}` }, typeDot(place.type), el('span', { text: typeLabel(place.type) })),
+        heartButton(place),
+        closeButton()),
+      el('h3', { class: `popup__title${place.name ? '' : ' is-unnamed'}`, text: placeName(place) }),
+      place.stars ? el('div', { class: 'popup__stars' },
+        el('span', { class: 'stars', 'aria-hidden': 'true', text: starString(place.stars) }),
+        el('span', { text: starLabel(place.stars) })) : null,
+      factChips(accommodationFacts(place.facts)),
+      description ? el('p', { class: 'popup__desc', text: description }) : null,
+      contactRows(place),
+      priceSection(place),
+      routeButton(place)));
+  if (figure) loadPhoto(place, figure);
+  return content;
 }
 
-function openPlacePopup(place) {
+function poiContent(item) {
+  const typeText = t(`poi.${item.type}`);
+  const color = mapView.LAYERS[item.category].color;
+  return el('div', { class: 'popup' },
+    el('div', { class: 'popup__body' },
+      el('div', { class: 'popup__head' },
+        el('span', { class: 'type-badge', style: `--c:${color}` }, dot(color, item.category), el('span', { text: typeText })),
+        closeButton()),
+      el('h3', { class: 'popup__title', text: item.name || typeText }),
+      item.operator && item.operator !== item.name ? el('p', { class: 'popup__subtitle', text: item.operator }) : null,
+      factChips(poiFacts(item.facts)),
+      contactRows(item),
+      routeButton(item)));
+}
+
+function contentFor(item) {
+  return item.kind === 'poi' ? poiContent(item) : popupContent(item);
+}
+
+function openItemPopup(item) {
   hideSearchPanel();
-  toggleLegend(false);
-  mapView.openPopup(place, popupContent(place));
-  state.popupPlace = place;
+  toggleLayers(false);
+  mapView.openPopup(item, contentFor(item));
+  state.popupItem = item;
 }
 
 async function selectPlace(place, context) {
@@ -449,43 +739,43 @@ async function selectPlace(place, context) {
   if (!wideQuery.matches) setSheet('peek');
   mapView.closePopup();
   await mapView.focusPlace(place);
-  openPlacePopup(place);
+  openItemPopup(place);
 }
 
 function updateAreaButton() {
   const zoomedOut = mapView.getZoom() < MIN_SEARCH_ZOOM;
-  dom.areaBtn.classList.toggle('is-disabled', zoomedOut && !state.loading);
-  dom.areaBtn.classList.toggle('is-loading', state.loading);
-  dom.areaBtn.setAttribute('aria-busy', String(state.loading));
-  dom.areaLabel.textContent = state.loading ? t('area.loading') : zoomedOut ? t('area.zoomIn') : t('area.search');
-}
-
-function setLoading(loading) {
-  state.loading = loading;
-  dom.progress.hidden = !loading;
-  updateAreaButton();
+  dom.areaBtn.classList.toggle('is-disabled', zoomedOut && !state.areaLoading);
+  dom.areaBtn.classList.toggle('is-loading', state.areaLoading);
+  dom.areaBtn.setAttribute('aria-busy', String(state.areaLoading));
+  dom.areaLabel.textContent = state.areaLoading ? t('area.loading') : zoomedOut ? t('area.zoomIn') : t('area.search');
 }
 
 async function searchArea() {
-  if (state.loading) return;
+  if (state.areaLoading) return;
   if (mapView.getZoom() < MIN_SEARCH_ZOOM) {
     mapView.zoomInTo(MIN_SEARCH_ZOOM);
     return;
   }
   hideSearchPanel();
+  toggleLayers(false);
   const bounds = mapView.getBounds();
   const center = mapView.getVisibleCenter();
-  setLoading(true);
+  const categories = ['accommodation', ...POI_CATEGORIES.filter((category) => state.layers[category])];
+  state.areaLoading = true;
+  updateAreaButton();
+  beginRequest();
   try {
-    const { places, truncated } = await fetchAccommodations(bounds);
+    const data = await fetchCategories(categories, bounds);
     state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
-    state.places = sortPlaces(places, state.origin);
+    state.places = sortPlaces(data.accommodation.items);
     state.searched = true;
+    for (const category of categories.slice(1)) {
+      state.poi[category] = data[category].items;
+      renderPoi(category);
+    }
     renderResults();
     dom.sheetBody.scrollTop = 0;
-    if (truncated) {
-      toast(t('results.truncated', { n: new Intl.NumberFormat(getLanguage()).format(OVERPASS_LIMIT) }), { duration: 6000 });
-    }
+    if (categories.some((category) => data[category].truncated)) truncatedNotice();
   } catch (error) {
     toast(errorMessage(error), {
       type: 'error',
@@ -493,12 +783,14 @@ async function searchArea() {
       action: { label: t('common.retry'), onClick: searchArea }
     });
   } finally {
-    setLoading(false);
+    state.areaLoading = false;
+    endRequest();
+    updateAreaButton();
   }
 }
 
-function showSearchMessage(text, isError = false) {
-  dom.searchMessage.textContent = text;
+function showSearchMessage(message, isError = false) {
+  dom.searchMessage.textContent = message;
   dom.searchMessage.classList.toggle('is-error', isError);
   dom.searchResults.replaceChildren();
   dom.searchPanel.hidden = false;
@@ -677,7 +969,7 @@ function initSheet() {
 function openDrawer() {
   renderFavoritesList();
   hideSearchPanel();
-  toggleLegend(false);
+  toggleLayers(false);
   dom.drawer.removeAttribute('inert');
   dom.drawer.setAttribute('aria-hidden', 'false');
   dom.scrim.hidden = false;
@@ -706,10 +998,11 @@ function renderAll() {
   applyTranslations();
   renderLanguageSwitch();
   renderThemeSwitch();
-  renderSortOptions();
+  fillSelect(dom.favoritesSort, FAVORITE_SORTS, 'favorites.sort', state.favoriteSort);
+  fillSelect(dom.resultsSort, RESULT_SORTS, 'sort', state.resultSort);
   renderSources();
-  renderLegend();
   renderAttribution();
+  if (!dom.layers.hidden) renderLayersPanel();
   renderResults();
   renderFavoritesList();
   updateAreaButton();
@@ -722,7 +1015,7 @@ function bindEvents() {
     if (dom.searchMessage.classList.contains('is-error')) hideSearchPanel();
   });
   dom.searchInput.addEventListener('focus', () => {
-    toggleLegend(false);
+    toggleLayers(false);
     if (dom.searchResults.children.length) dom.searchPanel.hidden = false;
   });
   dom.searchClear.addEventListener('click', () => {
@@ -734,31 +1027,34 @@ function bindEvents() {
   });
   dom.areaBtn.addEventListener('click', searchArea);
   dom.locateBtn.addEventListener('click', () => locate(false));
-  dom.legendBtn.addEventListener('click', (event) => {
+  dom.layersBtn.addEventListener('click', (event) => {
     event.stopPropagation();
-    toggleLegend();
+    toggleLayers();
   });
   dom.menuBtn.addEventListener('click', openDrawer);
   dom.drawerClose.addEventListener('click', closeDrawer);
   dom.scrim.addEventListener('click', closeDrawer);
-  dom.favoritesToggle.addEventListener('change', () => {
-    state.showFavorites = dom.favoritesToggle.checked;
-    save('showFavorites', state.showFavorites);
-    renderMarkers();
-  });
+  dom.favoritesToggle.addEventListener('change', () => setShowFavorites(dom.favoritesToggle.checked));
   dom.favoritesSort.addEventListener('change', () => {
     state.favoriteSort = pick(dom.favoritesSort.value, FAVORITE_SORTS, 'added');
     save('favoriteSort', state.favoriteSort);
     renderFavoritesList();
   });
+  dom.resultsSort.addEventListener('change', () => {
+    state.resultSort = pick(dom.resultsSort.value, RESULT_SORTS, 'recommended');
+    save('resultSort', state.resultSort);
+    state.places = sortPlaces(state.places);
+    renderResults();
+    dom.sheetBody.scrollTop = 0;
+  });
   document.addEventListener('pointerdown', (event) => {
-    if (!dom.legend.hidden && !dom.legend.contains(event.target) && !dom.legendBtn.contains(event.target)) toggleLegend(false);
+    if (!dom.layers.hidden && !dom.layers.contains(event.target) && !dom.layersBtn.contains(event.target)) toggleLayers(false);
     if (!dom.searchPanel.hidden && !dom.topbar.contains(event.target)) hideSearchPanel();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (dom.drawer.classList.contains('is-open')) closeDrawer();
-    else if (!dom.legend.hidden) toggleLegend(false);
+    else if (!dom.layers.hidden) toggleLayers(false);
     else if (!dom.searchPanel.hidden) hideSearchPanel();
     else mapView.closePopup();
   });
@@ -775,8 +1071,8 @@ function bindEvents() {
   window.addEventListener('offline', () => toast(t('errors.offline'), { type: 'error', duration: 6000 }));
   onLanguageChange(() => {
     renderAll();
-    if (state.popupPlace && mapView.getOpenPopupId() === state.popupPlace.id) {
-      mapView.updatePopup(popupContent(state.popupPlace));
+    if (state.popupItem && mapView.getOpenPopupId() === state.popupItem.id) {
+      mapView.updatePopup(contentFor(state.popupItem));
     }
     hideSearchPanel();
     setSheet(state.sheet, false);
@@ -787,9 +1083,10 @@ function collectDom() {
   const ids = {
     map: 'map', progress: 'progress', topbar: 'topbar', searchForm: 'search-form', searchInput: 'search-input',
     searchClear: 'search-clear', searchPanel: 'search-panel', searchMessage: 'search-message', searchResults: 'search-results',
-    areaBtn: 'area-btn', areaLabel: 'area-label', legendBtn: 'legend-btn', locateBtn: 'locate-btn', legend: 'legend',
-    legendList: 'legend-list', sheet: 'sheet', sheetHeader: 'sheet-header', resultsCount: 'results-count', chips: 'chips',
-    sheetBody: 'sheet-body', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
+    areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
+    layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
+    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', listToolbar: 'list-toolbar',
+    resultsSort: 'results-sort', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
     languageSwitch: 'language-switch', themeSwitch: 'theme-switch', sources: 'sources', toasts: 'toasts'
@@ -806,17 +1103,20 @@ function init() {
     return;
   }
   mapView.initMap(dom.map, {
+    dark: isDark(),
     onViewChange: updateAreaButton,
     onMapClick: () => {
       hideSearchPanel();
-      toggleLegend(false);
+      toggleLayers(false);
       dom.searchInput.blur();
     },
-    onPlaceClick: openPlacePopup,
+    onPlaceClick: openItemPopup,
+    onPoiClick: openItemPopup,
     onPopupClose: () => {
-      state.popupPlace = null;
+      state.popupItem = null;
     }
   });
+  mapView.setAccommodationsVisible(state.layers.accommodation);
   renderAll();
   initSheet();
   setSheet(wideQuery.matches ? 'full' : 'peek', false);

@@ -1,15 +1,25 @@
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
+const WIKIDATA_URL = 'https://www.wikidata.org/w/api.php';
 const OVERPASS_URLS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.private.coffee/api/interpreter'
 ];
 const NOMINATIM_INTERVAL = 1100;
 const CACHE_TTL = 30 * 60 * 1000;
-const CACHE_SIZE = 20;
+const CACHE_SIZE = 40;
 const BBOX_PADDING = 0.15;
 
-export const OVERPASS_LIMIT = 1000;
 export const ACCOMMODATION_TYPES = ['hotel', 'hostel', 'guest_house', 'apartment', 'motel'];
+
+export const CATEGORIES = {
+  accommodation: { key: 'tourism', values: ACCOMMODATION_TYPES, limit: 1000 },
+  money: { key: 'amenity', values: ['atm', 'bank', 'bureau_de_change'], limit: 400 },
+  shopping: { key: 'shop', values: ['supermarket', 'convenience', 'kiosk'], limit: 400 },
+  health: { key: 'amenity', values: ['pharmacy', 'hospital', 'clinic', 'doctors'], limit: 400 },
+  food: { key: 'amenity', values: ['restaurant', 'cafe', 'fast_food'], limit: 600 }
+};
+
+export const POI_CATEGORIES = ['money', 'shopping', 'health', 'food'];
 
 export class ApiError extends Error {
   constructor(code, status = 0) {
@@ -21,6 +31,7 @@ export class ApiError extends Error {
 }
 
 const nominatimCache = new Map();
+const photoCache = new Map();
 const overpassCache = [];
 let lastNominatimCall = 0;
 
@@ -108,14 +119,17 @@ function contains(outer, inner) {
   return outer.south <= inner.south && outer.north >= inner.north && outer.west <= inner.west && outer.east >= inner.east;
 }
 
-function isInside(place, bounds) {
-  return place.lat >= bounds.south && place.lat <= bounds.north && place.lon >= bounds.west && place.lon <= bounds.east;
+function isInside(item, bounds) {
+  return item.lat >= bounds.south && item.lat <= bounds.north && item.lon >= bounds.west && item.lon <= bounds.east;
 }
 
-function buildQuery(bounds) {
+function buildQuery(categories, bounds) {
   const box = [bounds.south, bounds.west, bounds.north, bounds.east].map((value) => value.toFixed(5)).join(',');
-  const pattern = ACCOMMODATION_TYPES.join('|');
-  return `[out:json][timeout:25];nwr["tourism"~"^(${pattern})$"](${box});out tags center ${OVERPASS_LIMIT};`;
+  const parts = categories.map((category, index) => {
+    const { key, values, limit } = CATEGORIES[category];
+    return `nwr["${key}"~"^(${values.join('|')})$"](${box})->.s${index};.s${index} out tags center ${limit};`;
+  });
+  return `[out:json][timeout:25];${parts.join('')}`;
 }
 
 async function queryOverpass(query) {
@@ -139,57 +153,212 @@ async function queryOverpass(query) {
   throw lastError || new ApiError('server');
 }
 
-export async function fetchAccommodations(bounds) {
+function findCached(category, bounds) {
+  return overpassCache.find((entry) => entry.category === category
+    && contains(entry.bounds, bounds)
+    && (!entry.truncated || contains(bounds, entry.query)));
+}
+
+export async function fetchCategories(categories, bounds) {
   const now = Date.now();
   for (let i = overpassCache.length - 1; i >= 0; i -= 1) {
     if (now - overpassCache[i].time > CACHE_TTL) overpassCache.splice(i, 1);
   }
-  const hit = overpassCache.find((entry) => contains(entry.bounds, bounds) && (!entry.truncated || contains(bounds, entry.query)));
-  if (hit) {
-    return { places: hit.places.filter((place) => isInside(place, bounds)), truncated: hit.truncated, cached: true };
+
+  const result = {};
+  const missing = [];
+  for (const category of categories) {
+    const hit = findCached(category, bounds);
+    if (hit) result[category] = { items: hit.items.filter((item) => isInside(item, bounds)), truncated: hit.truncated };
+    else missing.push(category);
   }
+  if (!missing.length) return result;
 
   const padded = padBounds(bounds);
-  const elements = await queryOverpass(buildQuery(padded));
-  const seen = new Set();
-  const places = [];
+  const elements = await queryOverpass(buildQuery(missing, padded));
+  const grouped = Object.fromEntries(missing.map((category) => [category, new Map()]));
   for (const element of elements) {
-    const place = normalizeElement(element);
-    if (!place || seen.has(place.id)) continue;
-    seen.add(place.id);
-    places.push(place);
+    const tags = element.tags || {};
+    for (const category of missing) {
+      const { key, values } = CATEGORIES[category];
+      if (!values.includes(tags[key])) continue;
+      const id = `${element.type}/${element.id}`;
+      if (grouped[category].has(id)) continue;
+      const item = category === 'accommodation' ? normalizeAccommodation(element) : normalizePoi(element, category);
+      if (item) grouped[category].set(id, item);
+    }
   }
-  const truncated = elements.length >= OVERPASS_LIMIT;
-  overpassCache.push({ bounds: padded, query: bounds, places, truncated, time: now });
-  if (overpassCache.length > CACHE_SIZE) overpassCache.shift();
-  return { places: places.filter((place) => isInside(place, bounds)), truncated, cached: false };
+  for (const category of missing) {
+    const items = [...grouped[category].values()];
+    const truncated = items.length >= CATEGORIES[category].limit;
+    overpassCache.push({ category, bounds: padded, query: bounds, items, truncated, time: now });
+    result[category] = { items: items.filter((item) => isInside(item, bounds)), truncated };
+  }
+  while (overpassCache.length > CACHE_SIZE) overpassCache.shift();
+  return result;
 }
 
-function normalizeElement(element) {
-  const tags = element.tags || {};
-  if (!ACCOMMODATION_TYPES.includes(tags.tourism)) return null;
+function coordinates(element) {
   const lat = element.lat ?? element.center?.lat;
   const lon = element.lon ?? element.center?.lon;
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
+}
+
+function normalizeAccommodation(element) {
+  const tags = element.tags || {};
+  const position = coordinates(element);
+  if (!position) return null;
   return {
     id: `${element.type}/${element.id}`,
+    kind: 'accommodation',
     type: tags.tourism,
     name: cleanText(tags.name) || null,
-    lat,
-    lon,
+    lat: position.lat,
+    lon: position.lon,
     stars: parseStars(tags.stars),
     address: formatAddress(tags),
+    city: cleanText(tags['addr:city']) || cleanText(tags['addr:postcode']) || null,
     website: safeUrl(tags.website || tags['contact:website'] || tags.url),
-    phone: firstValue(tags.phone || tags['contact:phone'] || tags['contact:mobile'])
+    phone: firstValue(tags.phone || tags['contact:phone'] || tags['contact:mobile']),
+    email: safeEmail(tags.email || tags['contact:email']),
+    description: descriptions(tags),
+    photo: photoSource(tags),
+    facts: accommodationFacts(tags)
   };
 }
 
+function normalizePoi(element, category) {
+  const tags = element.tags || {};
+  const position = coordinates(element);
+  if (!position) return null;
+  const { key } = CATEGORIES[category];
+  return {
+    id: `${element.type}/${element.id}`,
+    kind: 'poi',
+    category,
+    type: tags[key],
+    name: cleanText(tags.name) || null,
+    lat: position.lat,
+    lon: position.lon,
+    operator: cleanText(tags.operator || tags.brand) || null,
+    openingHours: cleanText(tags.opening_hours) || null,
+    address: formatAddress(tags),
+    website: safeUrl(tags.website || tags['contact:website'] || tags.url),
+    phone: firstValue(tags.phone || tags['contact:phone']),
+    facts: poiFacts(tags)
+  };
+}
+
+function accommodationFacts(tags) {
+  const facts = {};
+  const rooms = parseInt(tags.rooms, 10);
+  const beds = parseInt(tags.beds, 10);
+  if (rooms > 0 && rooms < 10000) facts.rooms = rooms;
+  if (beds > 0 && beds < 10000) facts.beds = beds;
+  const checkIn = cleanText(tags.check_in || tags.checkin).slice(0, 20);
+  const checkOut = cleanText(tags.check_out || tags.checkout).slice(0, 20);
+  if (checkIn) facts.checkIn = checkIn;
+  if (checkOut) facts.checkOut = checkOut;
+  if (/^(wlan|yes|wifi)$/i.test(tags.internet_access || '')) facts.wifi = tags['internet_access:fee'] === 'no' ? 'free' : 'yes';
+  if (tags.wheelchair === 'yes' || tags.wheelchair === 'limited') facts.wheelchair = tags.wheelchair;
+  if (tags.smoking === 'no') facts.nonSmoking = true;
+  return facts;
+}
+
+function poiFacts(tags) {
+  const facts = {};
+  if (tags.wheelchair === 'yes' || tags.wheelchair === 'limited') facts.wheelchair = tags.wheelchair;
+  if (tags.opening_hours === '24/7') facts.allDay = true;
+  if (tags.emergency === 'yes') facts.emergency = true;
+  if (tags.amenity === 'bank' && tags.atm === 'yes') facts.atm = true;
+  if (tags.amenity === 'atm' && (tags.fee === 'no' || tags.fee === 'yes')) facts.fee = tags.fee;
+  return facts;
+}
+
+function descriptions(tags) {
+  const result = {};
+  for (const lang of ['de', 'en', 'es']) {
+    const text = cleanText(tags[`description:${lang}`]);
+    if (text) result[lang] = text;
+  }
+  const fallback = cleanText(tags.description);
+  if (fallback) result.default = fallback;
+  return Object.keys(result).length ? result : null;
+}
+
+function photoSource(tags) {
+  const commons = cleanText(tags.wikimedia_commons);
+  if (/^File:/i.test(commons)) return { kind: 'commons', value: commons };
+  const image = cleanText(tags.image);
+  if (image) {
+    if (/^File:/i.test(image)) return { kind: 'commons', value: image };
+    const match = /commons\.wikimedia\.org\/wiki\/(File:[^?#]+)/i.exec(image);
+    if (match) {
+      try {
+        return { kind: 'commons', value: decodeURIComponent(match[1]) };
+      } catch {
+        return null;
+      }
+    }
+    if (/^https:\/\/\S+\.(jpe?g|png|webp)(\?\S*)?$/i.test(image)) return { kind: 'url', value: image };
+  }
+  const wikidata = cleanText(tags.wikidata);
+  if (/^Q\d+$/.test(wikidata)) return { kind: 'wikidata', value: wikidata };
+  return null;
+}
+
+function commonsPhoto(file) {
+  const name = String(file).replace(/^(File|Datei|Image|Archivo):/i, '').trim();
+  if (!name) return null;
+  return {
+    src: `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(name)}?width=640`,
+    link: `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(name.replace(/ /g, '_'))}`,
+    credit: 'Wikimedia Commons'
+  };
+}
+
+export async function fetchPhoto(source) {
+  if (!source) return null;
+  const key = `${source.kind}:${source.value}`;
+  if (photoCache.has(key)) return photoCache.get(key);
+  let photo = null;
+  if (source.kind === 'url') {
+    let host = '';
+    try {
+      host = new URL(source.value).hostname.replace(/^www\./, '');
+    } catch {
+      return null;
+    }
+    photo = { src: source.value, link: source.value, credit: host };
+  } else if (source.kind === 'commons') {
+    photo = commonsPhoto(source.value);
+  } else if (source.kind === 'wikidata') {
+    const params = new URLSearchParams({
+      action: 'wbgetclaims',
+      entity: source.value,
+      property: 'P18',
+      format: 'json',
+      origin: '*'
+    });
+    const data = await request(`${WIKIDATA_URL}?${params}`, {}, 10000);
+    const file = data?.claims?.P18?.[0]?.mainsnak?.datavalue?.value;
+    photo = typeof file === 'string' ? commonsPhoto(file) : null;
+  }
+  photoCache.set(key, photo);
+  return photo;
+}
+
 function cleanText(value) {
-  return typeof value === 'string' ? value.trim().slice(0, 200) : '';
+  return typeof value === 'string' ? value.trim().slice(0, 300) : '';
 }
 
 function firstValue(value) {
   return cleanText(String(value || '').split(';')[0]) || null;
+}
+
+function safeEmail(value) {
+  const email = firstValue(value);
+  return email && /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(email) ? email : null;
 }
 
 function parseStars(value) {
