@@ -251,13 +251,14 @@ async function overpassAttempt(index, query, timeout, signal) {
   return Array.isArray(data.elements) ? data.elements : [];
 }
 
-async function queryOverpass(query, signal, onWait, { patient = true } = {}) {
+async function queryOverpass(query, signal, onWait, { patient = true, timeout = null, single = false } = {}) {
   let lastError = null;
   let allBusy = true;
-  const order = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
+  const all = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
+  const order = single ? all.slice(0, 1) : all;
   for (const [attempt, index] of order.entries()) {
     try {
-      return await overpassAttempt(index, query, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT, signal);
+      return await overpassAttempt(index, query, timeout || (attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT), signal);
     } catch (error) {
       lastError = error instanceof ApiError ? error : new ApiError('server');
       if (lastError.code === 'offline' || lastError.code === 'aborted') throw lastError;
@@ -582,8 +583,33 @@ const FOSSGIS_URLS = {
 };
 const TRANSITOUS_URL = 'https://api.transitous.org/api/';
 const TRANSITOUS_VERSIONS = ['v5', 'v4', 'v2'];
-const ROUTE_TTL = 15 * 60 * 1000;
-const routeCache = new Map();
+const ROUTE_TTL = 6 * 60 * 60 * 1000;
+const ROUTE_PERSIST = 80;
+const ROUTE_POINTS = 400;
+const routeCache = new Map(Object.entries(load('routes', {}) || {}).filter(([, entry]) => entry && Date.now() - entry.time < ROUTE_TTL));
+let routeSaveTimer = 0;
+
+function thin(coords) {
+  if (!Array.isArray(coords) || coords.length <= ROUTE_POINTS) return coords;
+  const step = Math.ceil(coords.length / ROUTE_POINTS);
+  const result = coords.filter((_, index) => index % step === 0);
+  const last = coords[coords.length - 1];
+  if (result[result.length - 1] !== last) result.push(last);
+  return result;
+}
+
+function compact(value) {
+  if (Array.isArray(value)) return value.map((item) => ({ ...item, legs: item.legs ? item.legs.map((part) => ({ ...part, coords: thin(part.coords) })) : item.legs }));
+  return value && value.coords ? { ...value, coords: thin(value.coords) } : value;
+}
+
+function persistRoutes() {
+  clearTimeout(routeSaveTimer);
+  routeSaveTimer = setTimeout(() => {
+    const entries = [...routeCache.entries()].slice(-ROUTE_PERSIST).map(([key, entry]) => [key, { time: entry.time, value: compact(entry.value) }]);
+    while (entries.length && !save('routes', Object.fromEntries(entries))) entries.splice(0, 10);
+  }, 800);
+}
 const reverseCache = new Map();
 
 export const TRANSIT_MODES = {
@@ -610,6 +636,7 @@ function cached(key) {
 function remember(key, value) {
   routeCache.set(key, { value, time: Date.now() });
   if (routeCache.size > 200) routeCache.delete(routeCache.keys().next().value);
+  persistRoutes();
   return value;
 }
 
@@ -623,7 +650,7 @@ export async function routeStreet(mode, from, to, signal = null) {
   let lastError = null;
   for (const url of urls) {
     try {
-      const data = await request(`${url}${coords}?overview=${overview}&geometries=geojson&steps=false&alternatives=false`, {}, 20000, signal);
+      const data = await request(`${url}${coords}?overview=${overview}&geometries=geojson&steps=false&alternatives=false`, {}, 15000, signal);
       if (data.code === 'NoRoute' || data.code === 'NoSegment' || !Array.isArray(data.routes) || !data.routes.length) throw new ApiError('noroute');
       if (data.code !== 'Ok') throw new ApiError('server');
       const route = data.routes[0];
@@ -698,7 +725,7 @@ export async function routeTransit(mode, from, to, signal = null, time = null) {
   let data = null;
   for (const version of TRANSITOUS_VERSIONS) {
     try {
-      data = await request(`${TRANSITOUS_URL}${version}/plan?${params}`, { headers: { Accept: 'application/json' } }, 25000, signal);
+      data = await request(`${TRANSITOUS_URL}${version}/plan?${params}`, { headers: { Accept: 'application/json' } }, 18000, signal);
       break;
     } catch (error) {
       if (error.code === 'server' && error.status === 404) continue;
@@ -737,6 +764,8 @@ const STATION_RADIUS = 15000;
 const AIRPORT_WEIGHT = { 3: 0.5, 2: 0.85, 1: 1.4 };
 let airportList = null;
 const stationCache = new Map(Object.entries(load('stations', {}) || {}));
+const stationFailures = new Map();
+const STATION_RETRY = 10 * 60 * 1000;
 
 async function airports() {
   if (airportList) return airportList;
@@ -774,8 +803,15 @@ function shortLabel(name) {
 export async function nearestStation(point, type, signal = null) {
   const key = `${type}|${point.lat.toFixed(2)},${point.lon.toFixed(2)}`;
   if (stationCache.has(key)) return stationCache.get(key);
+  if (Date.now() - (stationFailures.get(key) || 0) < STATION_RETRY) return null;
   const query = `[out:json][timeout:15];${STATION_FILTERS[type]}(around:${STATION_RADIUS},${point.lat.toFixed(5)},${point.lon.toFixed(5)});out tags center 25;`;
-  const elements = await queryOverpass(query, signal, null, { patient: false });
+  let elements;
+  try {
+    elements = await queryOverpass(query, signal, null, { patient: false, timeout: 9000, single: true });
+  } catch (error) {
+    if (error.code !== 'aborted') stationFailures.set(key, Date.now());
+    throw error;
+  }
   let best = null;
   for (const element of elements) {
     const position = coordinates(element);

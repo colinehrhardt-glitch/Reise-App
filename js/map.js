@@ -153,7 +153,7 @@ function createCluster(color) {
     showCoverageOnHover: false,
     spiderfyOnMaxZoom: true,
     disableClusteringAtZoom: UNCLUSTER_ZOOM,
-    maxClusterRadius: (zoom) => (zoom >= 15 ? 50 : 72),
+    maxClusterRadius: (zoom) => (zoom >= 15 ? 36 : zoom >= 13 ? 48 : 72),
     chunkedLoading: true,
     iconCreateFunction: clusterIconFactory(color)
   });
@@ -557,6 +557,10 @@ export function invalidateSize() {
   if (map) map.invalidateSize({ pan: false });
 }
 
+export function setRouteDimmed(dimmed) {
+  map.getContainer().classList.toggle('route-dimmed', dimmed);
+}
+
 export function setRouteHandlers(next) {
   routeHandlers = next;
 }
@@ -597,9 +601,9 @@ export function arcCoords(from, to, steps = 64) {
 function stopIcon(label, start) {
   return L.divIcon({
     className: 'marker-icon',
-    html: `<div class="route-stop${start ? ' route-stop--start' : ''}">${label}</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14]
+    html: `<div class="route-stop${start ? ' route-stop--start' : ''}"><span>${label}</span></div>`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16]
   });
 }
 
@@ -659,10 +663,29 @@ function arrowRings(coords) {
 function drawRoute() {
   routeLayer.clearLayers();
   if (!routeData) return;
-  const { points, legs } = routeData;
+  const { points, legs, selected, stays } = routeData;
+  for (const stay of stays || []) {
+    const marker = L.marker([stay.lat, stay.lon], {
+      icon: L.divIcon({ className: 'marker-icon', html: `<div class="route-stay">${svg('hotel')}<span class="route-stay__check">${svg('check')}</span></div>`, iconSize: [30, 30], iconAnchor: [15, 15] }),
+      keyboard: false,
+      zIndexOffset: 1100,
+      title: `${stay.name} · ${stay.stop}`
+    }).addTo(routeLayer);
+    marker.on('click', () => routeHandlers.onStayClick?.(stay));
+  }
+  const hasSelection = Number.isInteger(selected) && legs[selected];
   legs.forEach((leg, index) => {
     if (!leg) return;
     const style = ROUTE_MODES[leg.mode] || ROUTE_MODES.car;
+    const dim = hasSelection && index !== selected;
+    const pick = () => routeHandlers.onLegClick?.(index);
+    const hitCoords = Array.isArray(leg.segments) && leg.segments.length ? leg.segments.flatMap((segment) => segment.coords || []) : leg.coords;
+    if (Array.isArray(hitCoords) && hitCoords.length > 1) {
+      L.polyline(hitCoords, { renderer: routeRenderer, color: '#000', opacity: 0, weight: 26, lineCap: 'round', className: 'route-hit' }).addTo(routeLayer).on('click', pick);
+    }
+    if (hasSelection && index === selected && Array.isArray(hitCoords) && hitCoords.length > 1) {
+      L.polyline(hitCoords, { renderer: routeRenderer, color: style.color, opacity: 0.22, weight: 16, lineCap: 'round', interactive: false }).addTo(routeLayer);
+    }
     const segments = Array.isArray(leg.segments) && leg.segments.length ? leg.segments : [{ coords: leg.coords, kind: 'main' }];
     for (const segment of segments) {
       if (!Array.isArray(segment.coords) || segment.coords.length < 2) continue;
@@ -671,11 +694,11 @@ function drawRoute() {
           renderer: routeRenderer,
           color: '#495057',
           weight: 3.5,
-          opacity: 0.8,
+          opacity: dim ? 0.35 : 0.8,
           dashArray: '1 8',
           lineCap: 'round'
         }).addTo(routeLayer);
-        line.on('click', () => routeHandlers.onLegClick?.(index));
+        line.on('click', pick);
         continue;
       }
       const rings = arrowRings(segment.coords);
@@ -685,13 +708,13 @@ function drawRoute() {
         color: '#ffffff',
         weight: 1.6,
         fillColor: style.color,
-        fillOpacity: leg.estimate ? 0.6 : 1,
-        opacity: 1,
+        fillOpacity: (leg.estimate ? 0.6 : 1) * (dim ? 0.4 : 1),
+        opacity: dim ? 0.5 : 1,
         smoothFactor: 0,
         noClip: true,
         lineJoin: 'round'
       }).addTo(routeLayer);
-      arrows.on('click', () => routeHandlers.onLegClick?.(index));
+      arrows.on('click', pick);
     }
     for (const terminal of leg.terminals || []) {
       if (!terminal) continue;
@@ -715,8 +738,8 @@ function scheduleRouteRedraw() {
   routeRedraw = requestAnimationFrame(drawRoute);
 }
 
-export function renderRoute(points, legs) {
-  routeData = { points, legs };
+export function renderRoute(points, legs, selected = null, stays = []) {
+  routeData = { points, legs, selected, stays };
   drawRoute();
 }
 

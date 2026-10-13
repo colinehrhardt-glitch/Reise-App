@@ -572,6 +572,8 @@ function applyHeader() {
 function setTab(tab, { fit = true } = {}) {
   const changed = state.tab !== tab;
   state.tab = tab;
+  if (changed) mapView.closePopup();
+  mapView.setRouteDimmed(tab !== 'route');
   save('tab', tab);
   const route = tab === 'route';
   dom.tabStays.setAttribute('aria-selected', String(!route));
@@ -1308,9 +1310,7 @@ function init() {
       state.routeCount = summary;
       applyHeader();
     },
-    onShow: () => {
-      if (state.tab !== 'route') setTab('route', { fit: false });
-    },
+    onShow: () => setTab('route', { fit: false }),
     onFindStay: findStayFor,
     onShowStay: showStay,
     onStaysChanged: refreshOpenPopup

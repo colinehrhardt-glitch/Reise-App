@@ -212,6 +212,10 @@ function suggestMode(a, b) {
 function pickOption(list, km) {
   const has = (mode) => list.find((option) => option.mode === mode);
   if (km < 2 && has('walk')) return 'walk';
+  const flight = has('flight');
+  const surface = list.filter((option) => option.mode !== 'flight' && option.mode !== 'car');
+  const fastestSurface = surface.length ? Math.min(...surface.map((option) => option.duration)) : Infinity;
+  if (km >= 450 && flight && flight.duration * 2 < fastestSurface) return 'flight';
   const timetable = list.filter((option) => option.itineraries && option.mode !== 'walk');
   if (timetable.length) return timetable.reduce((best, option) => (option.duration < best.duration ? option : best)).mode;
   if (km >= 700 && has('flight')) return 'flight';
@@ -341,10 +345,11 @@ async function computeFlight(a, b) {
 }
 
 async function stationsFor(a, b, type, signal) {
-  const from = await safely(() => nearestStation(a, type, signal));
-  if (!from) return null;
-  const to = await safely(() => nearestStation(b, type, signal));
-  if (!to || distance(from, to) < 2000) return null;
+  const [from, to] = await Promise.all([
+    safely(() => nearestStation(a, type, signal)),
+    safely(() => nearestStation(b, type, signal))
+  ]);
+  if (!from || !to || distance(from, to) < 2000) return null;
   return [from, to];
 }
 
@@ -392,35 +397,35 @@ async function computeOptions(leg, signal) {
   const { a, b, time } = leg;
   const km = distance(a, b) / 1000;
   const found = new Map();
-  if (km <= 12) {
-    const walk = await safely(() => routeStreet('walk', a, b, signal));
-    if (walk) found.set('walk', { status: 'ok', distance: walk.distance, duration: walk.duration, coords: walk.coords });
-  }
-  const road = await safely(() => routeStreet('car', a, b, signal));
+  const [walk, road, itineraries, flight] = await Promise.all([
+    km <= 12 ? safely(() => routeStreet('walk', a, b, signal)) : null,
+    safely(() => routeStreet('car', a, b, signal)),
+    km >= 1 ? safely(() => routeTransit('all', a, b, signal, time)) : null,
+    km >= 250 ? computeFlight(a, b) : null
+  ]);
+  if (walk) found.set('walk', { status: 'ok', distance: walk.distance, duration: walk.duration, coords: walk.coords });
   if (road) found.set('car', { status: 'ok', distance: road.distance, duration: road.duration, coords: road.coords });
-  if (km >= 1) {
-    const itineraries = (await safely(() => routeTransit('all', a, b, signal, time))) || [];
-    const groups = {};
-    for (const itinerary of itineraries) {
-      const mode = mainMode(itinerary);
-      if (!mode) continue;
-      (groups[mode] = groups[mode] || []).push(itinerary);
-    }
-    for (const [mode, list] of Object.entries(groups)) {
-      list.sort((x, y) => x.duration - y.duration);
-      found.set(mode, transitResult(list, a, b, mode));
-    }
+  const groups = {};
+  for (const itinerary of itineraries || []) {
+    const mode = mainMode(itinerary);
+    if (!mode) continue;
+    (groups[mode] = groups[mode] || []).push(itinerary);
   }
-  if (!found.has('bus') && road && km >= 3) {
-    const bus = km >= 20 ? await stationEstimate(a, b, 'bus', signal, road) : busEstimate(road);
-    if (bus) found.set('bus', bus);
+  for (const [mode, list] of Object.entries(groups)) {
+    list.sort((x, y) => x.duration - y.duration);
+    found.set(mode, transitResult(list, a, b, mode));
   }
-  if (!found.has('train') && km >= 30 && km <= 1500) {
-    const train = await stationEstimate(a, b, 'train', signal);
-    if (train) found.set('train', train);
-  }
+  const [bus, train] = await Promise.all([
+    !found.has('bus') && road && km >= 3 ? (km >= 20 ? stationEstimate(a, b, 'bus', signal, road) : busEstimate(road)) : null,
+    !found.has('train') && km >= 30 && km <= 1500 ? stationEstimate(a, b, 'train', signal) : null
+  ]);
+  if (bus) found.set('bus', bus);
+  if (train) found.set('train', train);
   if (!found.has('ferry') && !road && km < 600) found.set('ferry', ferryEstimate(a, b));
-  if (!found.has('flight') && (km >= 250 || (!road && km >= 600))) found.set('flight', await computeFlight(a, b));
+  if (!found.has('flight')) {
+    if (flight) found.set('flight', flight);
+    else if (!road && km >= 600) found.set('flight', await computeFlight(a, b));
+  }
   return MODES.filter((mode) => found.has(mode))
     .map((mode) => ({ mode, ...found.get(mode) }))
     .sort((x, y) => x.duration - y.duration);
@@ -569,57 +574,64 @@ function storeOptions(base, list) {
   }
 }
 
+const CONCURRENCY = 3;
+
+async function computeOne(initial, controller) {
+  let leg = legs().find((item) => item.base === initial.base) || initial;
+  try {
+    if (!state.options[leg.base] || state.options[leg.base].status !== 'ok') {
+      state.options[leg.base] = { status: 'loading' };
+      const list = await computeOptions(leg, controller.signal);
+      if (controller.signal.aborted) return;
+      storeOptions(leg.base, list);
+      if (!state.modes[leg.pair]) {
+        const picked = pickOption(list, distance(leg.a, leg.b) / 1000);
+        if (picked) state.auto[leg.pair] = picked;
+      }
+      for (const key of Object.keys(state.results)) {
+        if (key.startsWith(`${leg.base}|`) && state.results[key].status === 'loading') delete state.results[key];
+      }
+      leg = legs().find((item) => item.base === initial.base) || leg;
+    }
+    if (!leg.result || leg.result.status === 'loading') {
+      state.results[leg.key] = { status: 'loading' };
+      const result = await computeLeg(leg, controller.signal);
+      if (controller.signal.aborted) return;
+      if (result.status === 'switch') delete state.results[leg.key];
+      else state.results[leg.key] = result;
+    }
+  } catch (error) {
+    if (controller.signal.aborted || error.code === 'aborted') {
+      if (state.options[leg.base] && state.options[leg.base].status === 'loading') delete state.options[leg.base];
+      if (state.results[leg.key] && state.results[leg.key].status === 'loading') delete state.results[leg.key];
+      return;
+    }
+    if (state.options[leg.base] && state.options[leg.base].status === 'loading') state.options[leg.base] = { status: 'error' };
+    state.results[leg.key] = { status: 'error', code: error.code || 'server' };
+  }
+  if (controller.signal.aborted) return;
+  renderList();
+  renderSummary();
+  renderMap();
+}
+
 function compute() {
   if (state.run) state.run.abort();
   const controller = new AbortController();
   state.run = controller;
-  const pending = legs().filter((leg) => !leg.options || !leg.result || leg.result.status === 'loading');
+  const pending = legs().filter((leg) => !leg.options || leg.options.status !== 'ok' || !leg.result || leg.result.status === 'loading');
   for (const leg of pending) {
     if (!leg.result) state.results[leg.key] = { status: 'loading' };
   }
   render();
   if (!pending.length) return;
-  (async () => {
-    for (const initial of pending) {
-      if (controller.signal.aborted) return;
-      let leg = legs().find((item) => item.base === initial.base) || initial;
-      try {
-        if (!state.options[leg.base] || state.options[leg.base].status !== 'ok') {
-          state.options[leg.base] = { status: 'loading' };
-          const list = await computeOptions(leg, controller.signal);
-          if (controller.signal.aborted) return;
-          storeOptions(leg.base, list);
-          if (!state.modes[leg.pair]) {
-            const picked = pickOption(list, distance(leg.a, leg.b) / 1000);
-            if (picked) state.auto[leg.pair] = picked;
-          }
-          for (const key of Object.keys(state.results)) {
-            if (key.startsWith(`${leg.base}|`) && state.results[key].status === 'loading') delete state.results[key];
-          }
-          leg = legs().find((item) => item.base === initial.base) || leg;
-        }
-        if (!leg.result || leg.result.status === 'loading') {
-          state.results[leg.key] = { status: 'loading' };
-          const result = await computeLeg(leg, controller.signal);
-          if (controller.signal.aborted) return;
-          if (result.status === 'switch') delete state.results[leg.key];
-          else state.results[leg.key] = result;
-        }
-      } catch (error) {
-        if (controller.signal.aborted || error.code === 'aborted') {
-          if (state.options[leg.base] && state.options[leg.base].status === 'loading') delete state.options[leg.base];
-          if (state.results[leg.key] && state.results[leg.key].status === 'loading') delete state.results[leg.key];
-          return;
-        }
-        if (state.options[leg.base] && state.options[leg.base].status === 'loading') state.options[leg.base] = { status: 'error' };
-        state.results[leg.key] = { status: 'error', code: error.code || 'server' };
-      }
-      renderList();
-      renderSummary();
-      renderMap();
-    }
-    if (state.run === controller && legs().some((leg) => !leg.result)) compute();
-  })();
+  const queue = [...pending];
+  const worker = async () => {
+    while (queue.length && !controller.signal.aborted) await computeOne(queue.shift(), controller);
+  };
+  Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker)).then(() => {
+    if (state.run === controller && !controller.signal.aborted && legs().some((leg) => !leg.result)) compute();
+  });
 }
 
 export function formatDuration(seconds) {
@@ -712,7 +724,11 @@ function renderMap() {
     }
     return { mode: leg.mode, coords: result.coords, segments: transferSegments(leg, result), terminals: result.terminals, estimate: result.status === 'estimate' };
   });
-  mapView.renderRoute(mapPoints, mapLegs);
+  const stays = holders().filter((stop) => stop.chosen && stop.nights > 0 && !stop.noStay).map((stop) => {
+    const stay = stop.stays.find((item) => item.id === stop.chosen);
+    return stay ? { lat: stay.lat, lon: stay.lon, name: stay.name || t('place.unnamed'), stop: stop.name, item: stay } : null;
+  }).filter(Boolean);
+  mapView.renderRoute(mapPoints, mapLegs, state.expanded, stays);
 }
 
 export function fitRoute() {
@@ -1055,6 +1071,7 @@ function legRow(leg) {
             state.expanded = expanded ? null : leg.index;
             if (!expanded) fitLeg(leg);
             renderList();
+            renderMap();
           }
         }, legInfo(leg), icon('chevron'))),
       state.picker === leg.index ? modePicker(leg) : null,
@@ -1472,13 +1489,19 @@ export function initPlanner(container, opts) {
   mapView.setRouteHandlers({
     onLegClick: (index) => {
       state.expanded = index;
-      renderList();
+      state.picker = null;
       if (options.onShow) options.onShow();
-      const row = dom.list.querySelector(`[data-leg="${index}"]`);
-      if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      render();
+      requestAnimationFrame(() => {
+        const row = dom.list.querySelector(`[data-leg="${index}"]`);
+        if (row) row.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      });
     },
     onStopClick: () => {
       if (options.onShow) options.onShow();
+    },
+    onStayClick: (stay) => {
+      if (options.onShowStay) options.onShowStay(stay.item);
     }
   });
   renderPlanner();
