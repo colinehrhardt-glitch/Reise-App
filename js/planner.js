@@ -709,7 +709,7 @@ function renderSummary() {
 }
 
 function renderMap() {
-  const list = points();
+  const list = state.stops.length || state.startMode === 'custom' ? points() : [];
   const mapPoints = list.map((point, index) => ({
     lat: point.lat,
     lon: point.lon,
@@ -929,9 +929,9 @@ function legInfo(leg) {
     return el('span', { class: 'leg__info leg__info--error', text: result.code === 'noroute' ? t('route.noRoad') : t('route.error') });
   }
   const duration = formatDuration(result.duration);
-  return el('span', { class: 'leg__info' },
-    el('span', { text: formatDistance(result.distance) }),
-    el('span', { text: result.status === 'estimate' ? t('route.approx', { value: duration }) : duration }));
+  return el('span', { class: 'leg__info leg__info--done' },
+    el('span', { class: 'leg__time', text: result.status === 'estimate' ? t('route.approx', { value: duration }) : duration }),
+    el('span', { class: 'leg__distance', text: formatDistance(result.distance) }));
 }
 
 function encodeName(point) {
@@ -1497,8 +1497,13 @@ export function initPlanner(container, opts) {
         if (row) row.scrollIntoView({ block: 'start', behavior: 'smooth' });
       });
     },
-    onStopClick: () => {
+    onStopClick: (index) => {
       if (options.onShow) options.onShow();
+      const point = points()[index];
+      requestAnimationFrame(() => {
+        const row = point && !point.start ? dom.list.querySelector(`[data-id="${CSS.escape(point.key)}"]`) : dom.list.firstElementChild;
+        if (row) row.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      });
     },
     onStayClick: (stay) => {
       if (options.onShowStay) options.onShowStay(stay.item);
@@ -1579,7 +1584,10 @@ export function toggleStay(stopId, place) {
   } else {
     const stay = validStay(place);
     if (!stay) return false;
-    if (stop.stays.length >= MAX_STAYS) stop.stays.shift();
+    if (stop.stays.length >= MAX_STAYS) {
+      const oldest = stop.stays.findIndex((item) => item.id !== stop.chosen);
+      stop.stays.splice(oldest < 0 ? 0 : oldest, 1);
+    }
     stop.stays.push(stay);
     stop.noStay = false;
     if (!stop.chosen && stop.stays.length === 1) stop.chosen = stay.id;

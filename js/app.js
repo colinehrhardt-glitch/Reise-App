@@ -1075,7 +1075,9 @@ function applySheetOffset(offset, animate) {
 
 function setSheet(name, animate = true) {
   state.sheet = name;
-  applySheetOffset(sheetPositions()[name], animate);
+  const offset = sheetPositions()[name];
+  applySheetOffset(offset, animate);
+  dom.sheet.style.setProperty('--sheet-hidden', `${offset}px`);
   dom.sheet.dataset.state = name;
   document.body.dataset.sheet = name;
   dom.sheetHeader.setAttribute('aria-expanded', String(name !== 'peek'));

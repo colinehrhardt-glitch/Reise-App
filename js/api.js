@@ -1,4 +1,4 @@
-import { load, save } from './storage.js';
+import { load, save, remove } from './storage.js';
 
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 const WIKIDATA_URL = 'https://www.wikidata.org/w/api.php';
@@ -70,8 +70,18 @@ const photoCache = new Map();
 const overpassCache = restoreCache();
 let preferredEndpoint = Math.min(OVERPASS_URLS.length - 1, Math.max(0, Number(load('overpassEndpoint', 0)) || 0));
 let lastNominatimCall = 0;
+let nominatimQueue = Promise.resolve();
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function nominatimTurn(signal = null) {
+  const turn = nominatimQueue.then(async () => {
+    if (signal && signal.aborted) throw new ApiError('aborted');
+    const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
+    if (wait > 0) await abortableSleep(wait, signal);
+    lastNominatimCall = Date.now();
+  });
+  nominatimQueue = turn.catch(() => {});
+  return turn;
+}
 
 async function request(url, options = {}, timeout = 30000, signal = null) {
   if (signal && signal.aborted) throw new ApiError('aborted');
@@ -111,9 +121,7 @@ export async function searchPlaces(query, lang, { countries = [] } = {}) {
   const key = `${lang}|${codes}|${query.trim().toLowerCase()}`;
   if (nominatimCache.has(key)) return nominatimCache.get(key);
 
-  const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastNominatimCall = Date.now();
+  await nominatimTurn();
 
   const params = new URLSearchParams({
     q: query.trim(),
@@ -288,10 +296,7 @@ function fallbackTags(item, tourism) {
 export async function fetchAccommodationsFallback(bounds, lang, signal = null) {
   const places = new Map();
   for (const [phrase, tourism] of FALLBACK_TYPES) {
-    if (signal && signal.aborted) throw new ApiError('aborted');
-    const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
-    if (wait > 0) await abortableSleep(wait, signal);
-    lastNominatimCall = Date.now();
+    await nominatimTurn(signal);
     const params = new URLSearchParams({
       q: phrase,
       format: 'jsonv2',
@@ -748,9 +753,7 @@ export async function routeTransit(mode, from, to, signal = null, time = null) {
 export async function reverseGeocode(lat, lon, lang) {
   const key = `${lang}|${lat.toFixed(2)},${lon.toFixed(2)}`;
   if (reverseCache.has(key)) return reverseCache.get(key);
-  const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastNominatimCall = Date.now();
+  await nominatimTurn();
   const params = new URLSearchParams({ lat: lat.toFixed(5), lon: lon.toFixed(5), format: 'jsonv2', zoom: '10', 'accept-language': lang });
   const data = await request(`${REVERSE_URL}?${params}`, { headers: { Accept: 'application/json' } }, 10000);
   const address = (data && data.address) || {};
@@ -763,17 +766,26 @@ const AIRPORT_RADIUS = 150;
 const STATION_RADIUS = 15000;
 const AIRPORT_WEIGHT = { 3: 0.5, 2: 0.85, 1: 1.4 };
 let airportList = null;
-const stationCache = new Map(Object.entries(load('stations', {}) || {}));
+let airportLoad = null;
+const stationCache = new Map(Object.entries(load('stations2', {}) || {}));
+remove('stations');
 const stationFailures = new Map();
 const STATION_RETRY = 10 * 60 * 1000;
 
 async function airports() {
   if (airportList) return airportList;
-  const response = await fetch('data/airports.json');
-  if (!response.ok) throw new ApiError('server', response.status);
-  const rows = await response.json();
-  airportList = rows.map(([iata, name, lat, lon, size, city]) => ({ iata, name, lat, lon, size, city }));
-  return airportList;
+  if (!airportLoad) {
+    airportLoad = fetch('data/airports.json').then((response) => {
+      if (!response.ok) throw new ApiError('server', response.status);
+      return response.json();
+    }).then((rows) => {
+      airportList = rows.map(([iata, name, lat, lon, size, city]) => ({ iata, name, lat, lon, size, city }));
+      return airportList;
+    }).finally(() => {
+      airportLoad = null;
+    });
+  }
+  return airportLoad;
 }
 
 export async function nearestAirport(point) {
@@ -793,7 +805,7 @@ export async function nearestAirport(point) {
 
 const STATION_FILTERS = {
   bus: 'nwr["amenity"="bus_station"]',
-  train: 'nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|miniature|tram)$"]["usage"!="tourism"]'
+  train: 'nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|miniature|tram)$"]["usage"!="tourism"]["disused"!="yes"]["abandoned"!="yes"]'
 };
 
 function shortLabel(name) {
@@ -825,7 +837,7 @@ export async function nearestStation(point, type, signal = null) {
   }
   const station = best ? best.station : null;
   stationCache.set(key, station);
-  save('stations', Object.fromEntries([...stationCache.entries()].slice(-120)));
+  save('stations2', Object.fromEntries([...stationCache.entries()].slice(-120)));
   return station;
 }
 

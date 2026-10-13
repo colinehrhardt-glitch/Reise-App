@@ -773,6 +773,7 @@ svg[viewBox="0 0 24 24"] {
 .sheet__body {
   flex: 1;
   min-height: 0;
+  padding-bottom: var(--sheet-hidden, 0px);
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -2176,19 +2177,25 @@ svg[viewBox="0 0 24 24"] {
   column-gap: 8px;
 }
 
-.leg__info > span + span::before {
-  content: "·";
-  margin-right: 8px;
+.leg__info--done {
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.25;
+}
+
+.leg__time {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.leg__distance {
   color: var(--text-3);
+  font-size: 12.5px;
 }
 
 .leg__info--loading,
 .leg__info--error {
   column-gap: 8px;
-}
-
-.leg__info--loading > span + span::before {
-  content: none;
 }
 
 .leg__info--loading .spinner {
@@ -2748,6 +2755,9 @@ body[data-tab="route"] .area-btn {
 
 .option__name {
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .option__meta {

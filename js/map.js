@@ -753,7 +753,7 @@ export function fitCoords(coords, maxZoom = 14) {
   const bounds = L.latLngBounds(valid);
   map.flyToBounds(bounds, {
     paddingTopLeft: [insets.left + 36, insets.top + 36],
-    paddingBottomRight: [insets.right + 36, insets.bottom + 36],
+    paddingBottomRight: [Math.max(insets.right, 64) + 24, insets.bottom + 36],
     maxZoom,
     duration: 0.8
   });
