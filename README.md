@@ -9,8 +9,11 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - Filter, Sortierung (Empfohlen, Sterne, Entfernung), Marker-Clustering, ausziehbare Ergebnisliste
 - Popups mit Foto (Wikimedia Commons/Wikidata), Ausstattung, Kontakt und Preis-Links (Booking.com, Google)
 - Ebenen-Panel mit Legende: Transport (Flughäfen, Bahnhöfe, Busbahnhöfe, Fährterminals), Geld, Einkaufen, Gesundheit, Essen & Trinken zuschaltbar
-- Routen-Planer (Reiter „Route“): Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
-- Verkehrsmittel je Etappe (Vorschlag nach Entfernung, änderbar): Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
+- Routen-Planer (Reiter „Route“): Reisebeginn, Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
+- Nächte pro Ort (auch am Startort) mit automatisch berechneten An- und Abreisetagen
+- Unterkunft pro Ort: „Unterkunft suchen“ lädt die Unterkünfte dort, im Popup „Für <Ort> merken“, Merkliste mit Auswahl, Haken „Keine Unterkunft nötig“, Warnhinweis bei Orten ohne Unterkunft; Booking.com-Links mit Check-in/Check-out
+- Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen
+- Verkehrsmittel je Etappe: Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus
 

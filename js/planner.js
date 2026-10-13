@@ -8,6 +8,19 @@ export const MODES = ['walk', 'car', 'bus', 'train', 'ferry', 'flight'];
 
 const STORAGE_KEY = 'route';
 const BRUTE_FORCE_LIMIT = 7;
+const DEFAULT_NIGHTS = 2;
+const MAX_NIGHTS = 90;
+const MAX_STAYS = 12;
+const STAY_RADIUS = 30000;
+const TARGET_RADIUS = 60000;
+const DAY = 24 * 60 * 60 * 1000;
+const STAY_TYPES = ['hotel', 'hostel', 'guest_house', 'apartment', 'motel'];
+const MAIN_MODE = {
+  AIRPLANE: 'flight', FERRY: 'ferry', BUS: 'bus', COACH: 'bus',
+  HIGHSPEED_RAIL: 'train', LONG_DISTANCE: 'train', NIGHT_RAIL: 'train', REGIONAL_FAST_RAIL: 'train',
+  REGIONAL_RAIL: 'train', RAIL: 'train', SUBURBAN: 'train', METRO: 'train', SUBWAY: 'train', TRAM: 'train',
+  FUNICULAR: 'train', AERIAL_LIFT: 'bus', CABLE_CAR: 'bus', OTHER: 'bus'
+};
 const TRANSIT_ICON = {
   BUS: 'bus', COACH: 'bus', TRAM: 'train', SUBWAY: 'train', FERRY: 'ferry', AIRPLANE: 'flight',
   HIGHSPEED_RAIL: 'train', LONG_DISTANCE: 'train', NIGHT_RAIL: 'train', REGIONAL_FAST_RAIL: 'train',
@@ -15,14 +28,18 @@ const TRANSIT_ICON = {
 };
 
 const state = {
+  tripStart: null,
   startMode: 'gps',
   startPlace: null,
   stops: [],
   modes: {},
   auto: {},
   results: {},
+  options: {},
   picker: null,
   expanded: null,
+  stayOpen: null,
+  stayTarget: null,
   run: null,
   gpsName: null,
   gpsKey: null,
@@ -46,6 +63,41 @@ function validPlace(raw) {
   };
 }
 
+function validStay(raw) {
+  if (!raw || typeof raw.id !== 'string' || !STAY_TYPES.includes(raw.type)) return null;
+  if (!Number.isFinite(raw.lat) || !Number.isFinite(raw.lon)) return null;
+  return {
+    id: raw.id.slice(0, 40),
+    kind: 'accommodation',
+    type: raw.type,
+    name: text(raw.name),
+    lat: raw.lat,
+    lon: raw.lon,
+    stars: raw.stars && Number.isFinite(raw.stars.count) ? { count: raw.stars.count, superior: Boolean(raw.stars.superior) } : null,
+    address: text(raw.address),
+    city: text(raw.city),
+    website: typeof raw.website === 'string' && /^https?:\/\//i.test(raw.website) ? raw.website.slice(0, 300) : null,
+    phone: text(raw.phone, 60),
+    email: typeof raw.email === 'string' && /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(raw.email) ? raw.email : null,
+    photo: raw.photo && ['commons', 'wikidata', 'url'].includes(raw.photo.kind) && typeof raw.photo.value === 'string' ? { kind: raw.photo.kind, value: raw.photo.value.slice(0, 300) } : null,
+    facts: raw.facts && typeof raw.facts === 'object' ? raw.facts : {},
+    description: raw.description && typeof raw.description === 'object' ? raw.description : null
+  };
+}
+
+function validStop(raw) {
+  const place = validPlace(raw);
+  if (!place) return null;
+  const nights = Number.isInteger(raw.nights) ? Math.min(MAX_NIGHTS, Math.max(0, raw.nights)) : DEFAULT_NIGHTS;
+  const stays = Array.isArray(raw.stays) ? raw.stays.map(validStay).filter(Boolean).slice(0, MAX_STAYS) : [];
+  const chosen = typeof raw.chosen === 'string' && stays.some((stay) => stay.id === raw.chosen) ? raw.chosen : null;
+  return { ...place, nights, noStay: raw.noStay === true, stays, chosen };
+}
+
+function validDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T12:00:00`)) ? value : null;
+}
+
 function newId() {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -53,9 +105,10 @@ function newId() {
 function restore() {
   const raw = load(STORAGE_KEY, null);
   if (!raw || typeof raw !== 'object') return;
+  state.tripStart = validDate(raw.tripStart);
   state.startMode = raw.startMode === 'custom' ? 'custom' : 'gps';
-  state.startPlace = validPlace(raw.startPlace);
-  state.stops = Array.isArray(raw.stops) ? raw.stops.map(validPlace).filter(Boolean).slice(0, 40) : [];
+  state.startPlace = raw.startPlace ? validStop({ nights: 0, ...raw.startPlace, id: 'start' }) : null;
+  state.stops = Array.isArray(raw.stops) ? raw.stops.map(validStop).filter(Boolean).slice(0, 40) : [];
   state.modes = {};
   if (raw.modes && typeof raw.modes === 'object') {
     for (const [pair, mode] of Object.entries(raw.modes)) {
@@ -66,6 +119,7 @@ function restore() {
 
 function persist() {
   const ok = save(STORAGE_KEY, {
+    tripStart: state.tripStart,
     startMode: state.startMode,
     startPlace: state.startPlace,
     stops: state.stops,
@@ -87,7 +141,7 @@ function startPoint() {
       start: true
     };
   }
-  return state.startPlace ? { ...state.startPlace, key: 'start', start: true } : null;
+  return state.startPlace ? { ...state.startPlace, key: 'start', start: true, holder: true } : null;
 }
 
 function points() {
@@ -100,12 +154,70 @@ function pairKey(a, b) {
   return `${a.key}>${b.key}`;
 }
 
+function startDate() {
+  return state.tripStart ? new Date(`${state.tripStart}T12:00:00`) : null;
+}
+
+function addDays(date, days) {
+  return new Date(date.getTime() + days * DAY);
+}
+
+function isoDate(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function schedule() {
+  const base = startDate();
+  const list = points();
+  let offset = 0;
+  return list.map((point) => {
+    const nights = point.start && !point.holder ? 0 : point.nights || 0;
+    const arrival = base ? addDays(base, offset) : null;
+    offset += nights;
+    return { arrival, departure: base ? addDays(base, offset) : null, nights };
+  });
+}
+
+function departureFor(index) {
+  const plan = schedule()[index];
+  if (!plan || !plan.departure) return null;
+  const date = new Date(plan.departure);
+  date.setHours(8, 0, 0, 0);
+  return date;
+}
+
+function formatDay(date, withWeekday = false) {
+  return new Intl.DateTimeFormat(getLanguage(), withWeekday ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' }).format(date);
+}
+
+function formatRange(from, to) {
+  const format = new Intl.DateTimeFormat(getLanguage(), { day: 'numeric', month: 'short' });
+  if (typeof format.formatRange === 'function') return format.formatRange(from, to);
+  return `${format.format(from)} – ${format.format(to)}`;
+}
+
+function needsStay(stop) {
+  return stop.nights > 0 && !stop.noStay && !stop.chosen;
+}
+
 function suggestMode(a, b) {
   const km = distance(a, b) / 1000;
   if (km < 2) return 'walk';
-  if (km < 50) return 'bus';
-  if (km < 700) return 'train';
+  if (km < 700) return 'bus';
   return 'flight';
+}
+
+function pickOption(list, km) {
+  const has = (mode) => list.find((option) => option.mode === mode);
+  if (km < 2 && has('walk')) return 'walk';
+  const timetable = list.filter((option) => option.itineraries && option.mode !== 'walk');
+  if (timetable.length) return timetable.reduce((best, option) => (option.duration < best.duration ? option : best)).mode;
+  if (km >= 700 && has('flight')) return 'flight';
+  if (has('bus')) return 'bus';
+  if (has('ferry')) return 'ferry';
+  if (has('car')) return 'car';
+  return list.length ? list[0].mode : null;
 }
 
 function legMode(a, b) {
@@ -113,8 +225,8 @@ function legMode(a, b) {
   return state.modes[pair] || state.auto[pair] || suggestMode(a, b);
 }
 
-function legKey(a, b, mode) {
-  return `${pairKey(a, b)}|${mode}|${a.lat.toFixed(4)},${a.lon.toFixed(4)}|${b.lat.toFixed(4)},${b.lon.toFixed(4)}`;
+function legBase(a, b, time) {
+  return `${pairKey(a, b)}|${a.lat.toFixed(4)},${a.lon.toFixed(4)}|${b.lat.toFixed(4)},${b.lon.toFixed(4)}|${time ? isoDate(time) : 'now'}`;
 }
 
 function legs() {
@@ -124,10 +236,88 @@ function legs() {
     const a = list[i];
     const b = list[i + 1];
     const mode = legMode(a, b);
-    const key = legKey(a, b, mode);
-    result.push({ index: i, a, b, mode, key, pair: pairKey(a, b), result: state.results[key] || null });
+    const time = departureFor(i);
+    const base = legBase(a, b, time);
+    const key = `${base}|${mode}`;
+    result.push({ index: i, a, b, mode, key, base, time, pair: pairKey(a, b), result: state.results[key] || null, options: state.options[base] || null });
   }
   return result;
+}
+
+function mainMode(itinerary) {
+  let best = null;
+  for (const part of itinerary.legs) {
+    if (!MAIN_MODE[part.mode]) continue;
+    const length = part.distance || 0;
+    if (!best || length > best.length) best = { mode: MAIN_MODE[part.mode], length };
+  }
+  return best ? best.mode : null;
+}
+
+function transitResult(itineraries, a, b) {
+  const best = itineraries[0];
+  const coords = best.legs.flatMap((part) => part.coords);
+  const travelled = best.legs.reduce((sum, part) => sum + part.distance, 0);
+  return {
+    status: 'ok',
+    distance: travelled || distance(a, b),
+    duration: best.duration,
+    coords: coords.length > 1 ? coords : straight(a, b),
+    itineraries
+  };
+}
+
+function flightEstimate(a, b) {
+  const km = distance(a, b) / 1000;
+  return { status: 'estimate', distance: km * 1000, duration: (km / 800 + 0.5) * 3600, coords: mapView.arcCoords(a, b), note: 'route.flightNote' };
+}
+
+function ferryEstimate(a, b) {
+  const km = distance(a, b) / 1000;
+  return { status: 'estimate', distance: km * 1000, duration: (km * 1.1 / 30 + 0.5) * 3600, coords: straight(a, b), note: 'route.ferryNote' };
+}
+
+function busEstimate(road) {
+  return { status: 'estimate', distance: road.distance, duration: road.duration * 1.35, coords: road.coords, note: 'route.estimateNote' };
+}
+
+async function computeOptions(leg, signal) {
+  const { a, b, time } = leg;
+  const km = distance(a, b) / 1000;
+  const found = new Map();
+  const attempt = async (task) => {
+    try {
+      return await task();
+    } catch (error) {
+      if (error.code === 'aborted') throw error;
+      return null;
+    }
+  };
+  if (km <= 12) {
+    const walk = await attempt(() => routeStreet('walk', a, b, signal));
+    if (walk) found.set('walk', { status: 'ok', distance: walk.distance, duration: walk.duration, coords: walk.coords });
+  }
+  const road = await attempt(() => routeStreet('car', a, b, signal));
+  if (road) found.set('car', { status: 'ok', distance: road.distance, duration: road.duration, coords: road.coords });
+  if (km >= 1) {
+    const itineraries = (await attempt(() => routeTransit('all', a, b, signal, time))) || [];
+    const groups = {};
+    for (const itinerary of itineraries) {
+      const mode = mainMode(itinerary);
+      if (!mode) continue;
+      (groups[mode] = groups[mode] || []).push(itinerary);
+    }
+    for (const [mode, list] of Object.entries(groups)) {
+      list.sort((x, y) => x.duration - y.duration);
+      found.set(mode, transitResult(list, a, b));
+    }
+  }
+  if (!found.has('bus') && road && km >= 3) found.set('bus', busEstimate(road));
+  if (!found.has('ferry') && !road && km < 600) found.set('ferry', ferryEstimate(a, b));
+  if (!found.has('flight') && (km >= 250 || (!road && km >= 600))) found.set('flight', flightEstimate(a, b));
+  return MODES.filter((mode) => found.has(mode))
+    .map((mode) => ({ mode, ...found.get(mode) }))
+    .sort((x, y) => x.duration - y.duration);
 }
 
 function straight(a, b) {
@@ -135,39 +325,25 @@ function straight(a, b) {
 }
 
 async function computeLeg(leg, signal) {
-  const { a, b, mode, pair } = leg;
+  const { a, b, mode, pair, time } = leg;
   const km = distance(a, b) / 1000;
   if (mode === 'car' || mode === 'walk') {
     const route = await routeStreet(mode, a, b, signal);
     return { status: 'ok', distance: route.distance, duration: route.duration, coords: route.coords };
   }
-  if (mode === 'flight') {
-    return { status: 'estimate', distance: km * 1000, duration: (km / 800 + 0.5) * 3600, coords: mapView.arcCoords(a, b), note: 'route.flightNote' };
-  }
+  if (mode === 'flight') return flightEstimate(a, b);
   let itineraries = [];
   try {
-    itineraries = await routeTransit(mode, a, b, signal);
+    itineraries = await routeTransit(mode, a, b, signal, time);
   } catch (error) {
     if (error.code === 'aborted') throw error;
   }
-  if (itineraries.length) {
-    const best = itineraries[0];
-    const coords = best.legs.flatMap((part) => part.coords);
-    const travelled = best.legs.reduce((sum, part) => sum + part.distance, 0);
-    return {
-      status: 'ok',
-      distance: travelled || km * 1000,
-      duration: best.duration,
-      coords: coords.length > 1 ? coords : straight(a, b),
-      itineraries
-    };
-  }
-  if (mode === 'ferry') {
-    return { status: 'estimate', distance: km * 1000, duration: (km * 1.1 / 30 + 0.5) * 3600, coords: straight(a, b), note: 'route.ferryNote' };
-  }
+  if (itineraries.length) return transitResult(itineraries, a, b);
+  if (mode === 'ferry') return ferryEstimate(a, b);
   try {
     const road = await routeStreet('car', a, b, signal);
-    const duration = mode === 'bus' ? road.duration * 1.35 : Math.max(road.duration * 0.8, (road.distance / 1000 / 85) * 3600);
+    if (mode === 'bus') return busEstimate(road);
+    const duration = Math.max(road.duration * 0.8, (road.distance / 1000 / 85) * 3600);
     return { status: 'estimate', distance: road.distance, duration, coords: road.coords, note: 'route.estimateNote' };
   } catch (error) {
     if (error.code === 'aborted') throw error;
@@ -180,39 +356,68 @@ async function computeLeg(leg, signal) {
   return { status: 'estimate', distance: km * 1250, duration: (km * 1.25 / factor) * 3600, coords: straight(a, b), note: 'route.estimateNote' };
 }
 
+function storeOptions(base, list) {
+  state.options[base] = { status: 'ok', list };
+  for (const option of list) {
+    const key = `${base}|${option.mode}`;
+    const current = state.results[key];
+    if (!current || current.status === 'loading' || current.status === 'error') {
+      const { mode, ...result } = option;
+      state.results[key] = result;
+    }
+  }
+}
+
 function compute() {
   if (state.run) state.run.abort();
   const controller = new AbortController();
   state.run = controller;
-  const jobs = legs().filter((leg) => !leg.result || leg.result.status === 'loading');
-  for (const job of jobs) state.results[job.key] = { status: 'loading' };
+  const pending = legs().filter((leg) => !leg.options || !leg.result || leg.result.status === 'loading');
+  for (const leg of pending) {
+    if (!leg.result) state.results[leg.key] = { status: 'loading' };
+  }
   render();
-  if (!jobs.length) return;
+  if (!pending.length) return;
   (async () => {
-    let again = false;
-    for (const job of jobs) {
+    for (const initial of pending) {
       if (controller.signal.aborted) return;
+      let leg = legs().find((item) => item.base === initial.base) || initial;
       try {
-        const result = await computeLeg(job, controller.signal);
-        if (controller.signal.aborted) return;
-        if (result.status === 'switch') {
-          delete state.results[job.key];
-          again = true;
-        } else {
-          state.results[job.key] = result;
+        if (!state.options[leg.base] || state.options[leg.base].status !== 'ok') {
+          state.options[leg.base] = { status: 'loading' };
+          const list = await computeOptions(leg, controller.signal);
+          if (controller.signal.aborted) return;
+          storeOptions(leg.base, list);
+          if (!state.modes[leg.pair]) {
+            const picked = pickOption(list, distance(leg.a, leg.b) / 1000);
+            if (picked) state.auto[leg.pair] = picked;
+          }
+          for (const key of Object.keys(state.results)) {
+            if (key.startsWith(`${leg.base}|`) && state.results[key].status === 'loading') delete state.results[key];
+          }
+          leg = legs().find((item) => item.base === initial.base) || leg;
+        }
+        if (!leg.result || leg.result.status === 'loading') {
+          state.results[leg.key] = { status: 'loading' };
+          const result = await computeLeg(leg, controller.signal);
+          if (controller.signal.aborted) return;
+          if (result.status === 'switch') delete state.results[leg.key];
+          else state.results[leg.key] = result;
         }
       } catch (error) {
         if (controller.signal.aborted || error.code === 'aborted') {
-          delete state.results[job.key];
+          if (state.options[leg.base] && state.options[leg.base].status === 'loading') delete state.options[leg.base];
+          if (state.results[leg.key] && state.results[leg.key].status === 'loading') delete state.results[leg.key];
           return;
         }
-        state.results[job.key] = { status: 'error', code: error.code || 'server' };
+        if (state.options[leg.base] && state.options[leg.base].status === 'loading') state.options[leg.base] = { status: 'error' };
+        state.results[leg.key] = { status: 'error', code: error.code || 'server' };
       }
       renderList();
       renderSummary();
       renderMap();
     }
-    if (again && state.run === controller) compute();
+    if (state.run === controller && legs().some((leg) => !leg.result)) compute();
   })();
 }
 
@@ -260,16 +465,30 @@ function totals() {
   return { count: list.length, meters, seconds, estimated, pending, failed };
 }
 
+function holders() {
+  return state.startMode === 'custom' && state.startPlace ? [state.startPlace, ...state.stops] : state.stops;
+}
+
+function holder(id) {
+  return holders().find((item) => item.id === id) || null;
+}
+
+function totalNights() {
+  return holders().reduce((sum, stop) => sum + stop.nights, 0);
+}
+
 export function summaryText() {
   const total = totals();
-  if (!total.count) return state.stops.length ? t('route.needStart') : '';
+  const nights = totalNights();
+  const nightsText = nights ? ` · ${tCount('route.nights', nights)}` : '';
+  if (!total.count) return state.stops.length ? `${t('route.needStart')}${nightsText}` : '';
   if (total.pending) return t('route.loading');
   const duration = formatDuration(total.seconds);
   return t('route.summary', {
     legs: tCount('route.legs', total.count),
     distance: formatDistance(total.meters),
     duration: total.estimated ? t('route.approx', { value: duration }) : duration
-  });
+  }) + nightsText;
 }
 
 function renderSummary() {
@@ -422,7 +641,7 @@ function renderStart() {
       placeholder: t('route.startSearch'),
       compact: true,
       onPick: (place) => {
-        state.startPlace = { ...place, id: 'start' };
+        state.startPlace = validStop({ ...place, id: 'start', nights: 0 });
         persist();
         update();
         fitRoute();
@@ -512,7 +731,8 @@ function bookingLinks(leg) {
     links.push(['Google Maps', `https://www.google.com/maps/dir/?${params}`]);
   }
   if (mode === 'flight') {
-    const query = `${t('route.flightsQuery', { from: a.linkName || a.name, to: b.linkName || b.name })}`;
+    const names = { from: a.linkName || a.name, to: b.linkName || b.name };
+    const query = leg.time ? t('route.flightsQueryDate', { ...names, date: isoDate(leg.time) }) : t('route.flightsQuery', names);
     links.push(['Google Flights', `https://www.google.com/travel/flights?${new URLSearchParams({ q: query, hl: lang })}`]);
   }
   if (['bus', 'train', 'ferry', 'flight'].includes(mode)) {
@@ -537,9 +757,54 @@ function itineraryItem(itinerary) {
     }, icon(TRANSIT_ICON[part.mode] || 'bus'), el('span', { text: part.name || t(`modes.${TRANSIT_ICON[part.mode] || 'bus'}`) })))));
 }
 
+function optionRow(leg, option) {
+  const selected = option.mode === leg.mode;
+  const duration = formatDuration(option.duration);
+  const badge = option.status === 'ok'
+    ? (option.itineraries ? t('route.timetable') : t('route.road'))
+    : t('route.estimated');
+  return el('li', {},
+    el('button', {
+      type: 'button',
+      class: `option${selected ? ' is-selected' : ''}`,
+      style: `--c:${mapView.ROUTE_MODES[option.mode].color}`,
+      'aria-pressed': String(selected),
+      onclick: () => {
+        if (selected) return;
+        state.modes[leg.pair] = option.mode;
+        delete state.auto[leg.pair];
+        persist();
+        compute();
+      }
+    },
+    el('span', { class: 'option__icon' }, icon(option.mode)),
+    el('span', { class: 'option__text' },
+      el('span', { class: 'option__name', text: t(`modes.${option.mode}`) }),
+      el('span', { class: 'option__meta', text: option.itineraries ? `${formatDistance(option.distance)} · ${tCount('route.connectionsCount', option.itineraries.length)}` : formatDistance(option.distance) })),
+    el('span', { class: 'option__side' },
+      el('span', { class: 'option__time', text: option.status === 'estimate' ? t('route.approx', { value: duration }) : duration }),
+      el('span', { class: `option__badge option__badge--${option.status === 'ok' && option.itineraries ? 'timetable' : option.status}`, text: badge })),
+    selected ? el('span', { class: 'option__check', 'aria-hidden': 'true' }, icon('check')) : null));
+}
+
+function optionsBlock(leg) {
+  const options = leg.options;
+  const title = el('p', { class: 'leg__subtitle', text: t('route.options') });
+  if (!options || options.status === 'loading') {
+    return el('div', { class: 'leg__options' }, title,
+      el('p', { class: 'leg__loading' }, el('span', { class: 'spinner' }), el('span', { text: t('route.optionsLoading') })));
+  }
+  if (options.status === 'error' || !options.list.length) {
+    return el('div', { class: 'leg__options' }, title, el('p', { class: 'leg__note', text: t('route.noOptions') }));
+  }
+  return el('div', { class: 'leg__options' }, title,
+    el('ul', { class: 'options' }, options.list.map((option) => optionRow(leg, option))));
+}
+
 function legDetails(leg) {
   const result = leg.result;
-  const children = [];
+  const children = [optionsBlock(leg)];
+  if (leg.time) children.unshift(el('p', { class: 'leg__date', text: t('route.departure', { date: formatDay(leg.time, true) }) }));
   if (result && result.note) children.push(el('p', { class: 'leg__note', text: t(result.note) }));
   if (result && result.status === 'error') {
     children.push(el('button', {
@@ -573,46 +838,162 @@ function legRow(leg) {
           'aria-expanded': String(expanded),
           onclick: () => {
             state.expanded = expanded ? null : leg.index;
-            renderList();
             if (!expanded) fitLeg(leg);
+            renderList();
           }
         }, legInfo(leg), icon('chevron'))),
       state.picker === leg.index ? modePicker(leg) : null,
       expanded ? legDetails(leg) : null));
 }
 
-function stopRow(stop, number) {
-  return el('li', { class: 'stop', 'data-id': stop.id },
-    el('button', { type: 'button', class: 'stop__grip', 'aria-label': t('route.drag'), 'data-grip': stop.id }, icon('grip')),
-    el('span', { class: 'stop__badge', text: String(number) }),
+function nightsControl(stop) {
+  const change = (delta) => {
+    const next = Math.min(MAX_NIGHTS, Math.max(0, stop.nights + delta));
+    if (next === stop.nights) return;
+    const target = holder(stop.id);
+    target.nights = next;
+    persist();
+    compute();
+  };
+  return el('div', { class: 'nights', role: 'group', 'aria-label': t('route.nightsLabel') },
+    el('button', { type: 'button', class: 'nights__btn', 'aria-label': t('route.nightsLess'), disabled: stop.nights <= 0, onclick: () => change(-1) }, icon('minus')),
+    el('span', { class: 'nights__value', text: stop.nights ? tCount('route.nights', stop.nights) : t('route.passThrough') }),
+    el('button', { type: 'button', class: 'nights__btn', 'aria-label': t('route.nightsMore'), disabled: stop.nights >= MAX_NIGHTS, onclick: () => change(1) }, icon('plus')));
+}
+
+function stayName(stay) {
+  return stay.name || t('place.unnamed');
+}
+
+function stayCandidate(stop, stay) {
+  const chosen = stop.chosen === stay.id;
+  return el('li', { class: `candidate${chosen ? ' is-chosen' : ''}` },
+    el('button', { type: 'button', class: 'candidate__main', onclick: () => options.onShowStay && options.onShowStay(stay) },
+      el('span', { class: 'candidate__name', text: stayName(stay) }),
+      el('span', { class: 'candidate__meta', text: [t(`types.${stay.type}.one`), stay.stars ? '★'.repeat(Math.floor(stay.stars.count)) : null, formatDistance(distance(stop, stay))].filter(Boolean).join(' · ') })),
     el('button', {
       type: 'button',
-      class: 'stop__text stop__text--button',
-      onclick: () => mapView.fitCoords([[stop.lat, stop.lon]], 13)
-    },
-    el('span', { class: 'stop__name', text: stop.name }),
-    stop.detail ? el('span', { class: 'stop__detail', text: stop.detail }) : null),
-    el('button', {
-      type: 'button',
-      class: 'icon-btn stop__remove',
-      'aria-label': `${t('route.remove')}: ${stop.name}`,
-      onclick: () => removeStop(stop.id)
-    }, icon('close')));
+      class: `btn btn--small ${chosen ? 'btn--primary candidate__pick' : 'btn--secondary candidate__pick'}`,
+      'aria-pressed': String(chosen),
+      onclick: () => chooseStay(stop.id, chosen ? null : stay.id)
+    }, chosen ? icon('check') : null, el('span', { text: chosen ? t('route.chosen') : t('route.choose') })),
+    el('button', { type: 'button', class: 'icon-btn candidate__remove', 'aria-label': `${t('route.removeCandidate')}: ${stayName(stay)}`, onclick: () => removeStay(stop.id, stay.id) }, icon('close')));
+}
+
+function stayBlock(stop) {
+  if (stop.nights === 0) return null;
+  const chosen = stop.stays.find((stay) => stay.id === stop.chosen);
+  const open = state.stayOpen === stop.id;
+  const lines = [];
+  if (stop.noStay) {
+    lines.push(el('p', { class: 'stay__status stay__status--none', text: t('route.noStayNeeded') }));
+  } else if (chosen) {
+    lines.push(el('button', { type: 'button', class: 'stay__chosen', onclick: () => options.onShowStay && options.onShowStay(chosen) },
+      icon(chosen.type), el('span', { text: stayName(chosen) }), icon('check')));
+  } else {
+    lines.push(el('p', { class: 'stay__status stay__status--warn' }, icon('alert'), el('span', { text: stop.stays.length ? t('route.noStayChosen') : t('route.noStayWarning') })));
+  }
+  const actions = [];
+  if (!stop.noStay) {
+    actions.push(el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: () => findStay(stop) }, icon('search'), el('span', { text: t('route.findStay') })));
+    if (stop.stays.length) {
+      actions.push(el('button', {
+        type: 'button',
+        class: 'link-btn',
+        'aria-expanded': String(open),
+        text: tCount('route.candidates', stop.stays.length),
+        onclick: () => {
+          state.stayOpen = open ? null : stop.id;
+          renderList();
+        }
+      }));
+    }
+  }
+  const toggle = el('input', { type: 'checkbox', class: 'stay__check' });
+  toggle.checked = stop.noStay;
+  toggle.addEventListener('change', () => {
+    const target = holder(stop.id);
+    target.noStay = toggle.checked;
+    persist();
+    render();
+  });
+  return el('div', { class: 'stay' },
+    lines,
+    actions.length ? el('div', { class: 'stay__actions' }, actions) : null,
+    open && !stop.noStay ? el('ul', { class: 'candidates' }, stop.stays.map((stay) => stayCandidate(stop, stay))) : null,
+    el('label', { class: 'stay__toggle' }, toggle, el('span', { text: t('route.noStayNeeded') })));
+}
+
+function stopRow(stop, number, plan) {
+  const dates = plan && plan.arrival
+    ? (stop.nights ? formatRange(plan.arrival, plan.departure) : formatDay(plan.arrival))
+    : null;
+  return el('li', { class: `stop stop--full${needsStay(stop) ? ' needs-stay' : ''}`, 'data-id': stop.id },
+    el('div', { class: 'stop__head' },
+      el('button', { type: 'button', class: 'stop__grip', 'aria-label': t('route.drag'), 'data-grip': stop.id }, icon('grip')),
+      el('span', { class: 'stop__badge', text: String(number) }),
+      el('button', {
+        type: 'button',
+        class: 'stop__text stop__text--button',
+        onclick: () => mapView.fitCoords([[stop.lat, stop.lon]], 13)
+      },
+      el('span', { class: 'stop__name', text: stop.name }),
+      el('span', { class: 'stop__detail', text: [dates, stop.detail].filter(Boolean).join(' · ') })),
+      el('button', {
+        type: 'button',
+        class: 'icon-btn stop__remove',
+        'aria-label': `${t('route.remove')}: ${stop.name}`,
+        onclick: () => removeStop(stop.id)
+      }, icon('close'))),
+    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
+}
+
+function startListRow(point, plan) {
+  const head = el('div', { class: 'stop__head' },
+    el('span', { class: 'stop__badge stop__badge--start', text: 'S' }),
+    el('span', { class: 'stop__text' },
+      el('span', { class: 'stop__name', text: point.name }),
+      plan && plan.arrival ? el('span', { class: 'stop__detail', text: point.nights ? formatRange(plan.arrival, plan.departure) : t('route.departure', { date: formatDay(plan.arrival, true) }) }) : null));
+  if (!point.holder) return el('li', { class: 'stop stop--start' }, head);
+  const stop = holder('start');
+  return el('li', { class: `stop stop--start stop--full${needsStay(stop) ? ' needs-stay' : ''}` },
+    head,
+    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
+}
+
+function renderTrip() {
+  const input = el('input', { type: 'date', class: 'date-input', 'aria-label': t('route.tripStart') });
+  input.value = state.tripStart || '';
+  input.addEventListener('change', () => {
+    state.tripStart = validDate(input.value);
+    persist();
+    compute();
+  });
+  const base = startDate();
+  const nights = totalNights();
+  const missing = holders().filter(needsStay).length;
+  dom.trip.replaceChildren(...[
+    el('div', { class: 'planner-label' }, el('span', { text: t('route.tripStart') })),
+    el('div', { class: 'trip-row' },
+      input,
+      base && nights ? el('span', { class: 'trip-row__end', text: t('route.tripEnd', { date: formatDay(addDays(base, nights), true) }) }) : null),
+    missing ? el('p', { class: 'trip-warning' }, icon('alert'), el('span', { text: tCount('route.missingStays', missing) })) : null
+  ].filter(Boolean));
 }
 
 function renderList() {
+  renderTrip();
   const list = points();
   const legList = legs();
+  const plans = schedule();
   const rows = [];
   const offset = list[0] && list[0].start ? 1 : 0;
   list.forEach((point, index) => {
-    if (!point.start) rows.push(stopRow(point, index + 1 - offset));
+    if (!point.start) rows.push(stopRow(point, index + 1 - offset, plans[index]));
     if (legList[index]) rows.push(legRow(legList[index]));
   });
-  if (list[0] && list[0].start && legList.length) {
-    rows.unshift(el('li', { class: 'stop stop--start' },
-      el('span', { class: 'stop__badge stop__badge--start', text: 'S' }),
-      el('span', { class: 'stop__text' }, el('span', { class: 'stop__name', text: list[0].name }))));
+  if (list[0] && list[0].start && (legList.length || list[0].holder)) {
+    rows.unshift(startListRow(list[0], plans[0]));
   }
   dom.list.replaceChildren(...rows);
   dom.empty.textContent = state.stops.length ? '' : t('route.empty');
@@ -671,7 +1052,7 @@ function removeStop(id) {
 }
 
 export function addStop(place) {
-  const stop = validPlace({ ...place, id: newId() });
+  const stop = validStop({ ...place, id: newId() });
   if (!stop) return false;
   const duplicate = state.stops.some((item) => distance(item, stop) < 50);
   if (duplicate) {
@@ -687,9 +1068,9 @@ export function addStop(place) {
 export function applyPlan({ startPlace = null, stops = [] } = {}) {
   if (startPlace) {
     state.startMode = 'custom';
-    state.startPlace = validPlace({ ...startPlace, id: 'start' });
+    state.startPlace = validStop({ nights: 0, ...startPlace, id: 'start' });
   }
-  state.stops = stops.map((stop) => validPlace({ ...stop, id: newId() })).filter(Boolean);
+  state.stops = stops.map((stop) => validStop({ ...stop, id: newId() })).filter(Boolean);
   state.modes = {};
   state.auto = {};
   persist();
@@ -858,6 +1239,7 @@ function initDrag() {
 export function initPlanner(container, opts) {
   options = opts;
   restore();
+  dom.trip = el('section', { class: 'planner-section' });
   dom.start = el('section', { class: 'planner-section' });
   dom.list = el('ol', { class: 'route-list' });
   dom.empty = el('p', { class: 'empty empty--compact planner-empty' });
@@ -866,6 +1248,7 @@ export function initPlanner(container, opts) {
   dom.clear = el('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: clearRoute });
   dom.actions = el('div', { class: 'route-actions' }, dom.optimize, dom.clear);
   container.replaceChildren(el('div', { class: 'planner' },
+    dom.trip,
     dom.start,
     el('section', { class: 'planner-section planner-section--route' }, dom.list, dom.empty),
     dom.add,
@@ -903,4 +1286,78 @@ export function renderPlanner() {
 
 export function hasRoute() {
   return state.stops.length > 0;
+}
+
+function findStay(stop) {
+  state.stayTarget = stop.id;
+  if (options.onFindStay) options.onFindStay(stop);
+}
+
+function chooseStay(stopId, stayId) {
+  const stop = holder(stopId);
+  if (!stop) return;
+  stop.chosen = stayId;
+  if (stayId) stop.noStay = false;
+  persist();
+  render();
+  if (options.onStaysChanged) options.onStaysChanged();
+}
+
+function removeStay(stopId, stayId) {
+  const stop = holder(stopId);
+  if (!stop) return;
+  stop.stays = stop.stays.filter((stay) => stay.id !== stayId);
+  if (stop.chosen === stayId) stop.chosen = null;
+  persist();
+  render();
+  if (options.onStaysChanged) options.onStaysChanged();
+}
+
+export function stayTargetFor(place) {
+  const candidates = holders().filter((stop) => stop.nights > 0);
+  const explicit = candidates.find((stop) => stop.id === state.stayTarget);
+  if (explicit && distance(explicit, place) <= TARGET_RADIUS) return explicit;
+  let best = null;
+  for (const stop of candidates) {
+    const d = distance(stop, place);
+    if (d <= STAY_RADIUS && (!best || d < best.d)) best = { stop, d };
+  }
+  return best ? best.stop : null;
+}
+
+export function stayStatus(stopId, placeId) {
+  const stop = holder(stopId);
+  if (!stop) return { saved: false, chosen: false };
+  return { saved: stop.stays.some((stay) => stay.id === placeId), chosen: stop.chosen === placeId };
+}
+
+export function toggleStay(stopId, place) {
+  const stop = holder(stopId);
+  if (!stop) return false;
+  const index = stop.stays.findIndex((stay) => stay.id === place.id);
+  if (index >= 0) {
+    stop.stays.splice(index, 1);
+    if (stop.chosen === place.id) stop.chosen = null;
+  } else {
+    const stay = validStay(place);
+    if (!stay) return false;
+    if (stop.stays.length >= MAX_STAYS) stop.stays.shift();
+    stop.stays.push(stay);
+    stop.noStay = false;
+    if (!stop.chosen && stop.stays.length === 1) stop.chosen = stay.id;
+    state.stayOpen = stop.id;
+  }
+  persist();
+  render();
+  return index < 0;
+}
+
+export function stayDatesFor(place) {
+  const stop = stayTargetFor(place);
+  if (!stop || !state.tripStart) return null;
+  const list = points();
+  const index = list.findIndex((point) => point.key === stop.id);
+  const plan = schedule()[index];
+  if (!plan || !plan.arrival || !stop.nights) return null;
+  return { checkin: isoDate(plan.arrival), checkout: isoDate(plan.departure), stop: stop.name };
 }

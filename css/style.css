@@ -2388,3 +2388,383 @@ body[data-tab="route"] .area-btn {
 .sheet[data-tab="route"] .sheet__count {
   white-space: normal;
 }
+
+.trip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.date-input {
+  min-height: 46px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 16px;
+  min-width: 170px;
+}
+
+.trip-row__end {
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.trip-warning,
+.stay__status--warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--star) 16%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.trip-warning svg,
+.stay__status--warn svg {
+  width: 18px;
+  height: 18px;
+  color: var(--star);
+}
+
+.stop.stop--full {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 6px 0;
+}
+
+.stop__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stop__extra {
+  padding: 2px 0 6px 82px;
+  display: grid;
+  gap: 8px;
+}
+
+.nights {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: start;
+  padding: 3px;
+  border-radius: 22px;
+  background: var(--surface-2);
+}
+
+.nights__btn {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+
+.nights__btn[disabled] {
+  opacity: 0.35;
+  box-shadow: none;
+}
+
+.nights__btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.nights__value {
+  min-width: 92px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stay {
+  display: grid;
+  gap: 8px;
+}
+
+.stay__status {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.stay__status--warn {
+  margin: 0;
+}
+
+.stay__chosen {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+}
+
+.stay__chosen span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stay__chosen svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+.stay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.stay__toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  font-size: 14px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.stay__check {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.candidate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px 6px 10px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.candidate.is-chosen {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.candidate__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  min-height: 40px;
+  justify-content: center;
+}
+
+.candidate__name {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate__meta {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.btn.candidate__pick {
+  min-height: 36px;
+  padding: 0 12px;
+  flex: none;
+}
+
+.candidate__remove {
+  width: 36px;
+  height: 36px;
+  color: var(--text-3);
+}
+
+.stop.needs-stay .stop__badge {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--star) 55%, transparent);
+}
+
+.leg__date {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.leg__options {
+  margin-bottom: 12px;
+}
+
+.leg__loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.leg__loading .spinner {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+  color: var(--accent);
+}
+
+.options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 58px;
+  padding: 8px 12px 8px 10px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1.5px solid transparent;
+  text-align: left;
+}
+
+.option.is-selected {
+  border-color: var(--c);
+  background: color-mix(in srgb, var(--c) 9%, var(--surface));
+}
+
+.option__icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--c);
+  color: #fff;
+  flex: none;
+}
+
+.option__icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.option__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.option__name {
+  font-weight: 600;
+}
+
+.option__meta {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.option__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: none;
+}
+
+.option__time {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.option__badge {
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.option__badge--timetable {
+  background: color-mix(in srgb, #2f9e44 18%, transparent);
+  color: #2b8a3e;
+}
+
+.option__badge--estimate {
+  background: color-mix(in srgb, var(--star) 18%, transparent);
+  color: var(--text-2);
+}
+
+.option__check {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--c);
+  color: #fff;
+}
+
+.option__check svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
+}
+
+.btn.popup__stay {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.btn.popup__stay.is-saved svg {
+  color: var(--accent);
+}
+
+@media (max-width: 380px) {
+  .stop__extra {
+    padding-left: 44px;
+  }
+}

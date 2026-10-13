@@ -3,7 +3,7 @@ import { load, save } from './storage.js';
 import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
-import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute } from './planner.js';
+import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, stayTargetFor, stayStatus, toggleStay, stayDatesFor } from './planner.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
@@ -586,6 +586,45 @@ function setTab(tab, { fit = true } = {}) {
   if (route && changed && fit) fitRoute();
 }
 
+function stayButton(place) {
+  const stop = stayTargetFor(place);
+  if (!stop) return null;
+  const status = stayStatus(stop.id, place.id);
+  return el('button', {
+    type: 'button',
+    class: `btn ${status.saved ? 'btn--secondary is-saved' : 'btn--primary'} popup__stay`,
+    'aria-pressed': String(status.saved),
+    onclick: () => {
+      const added = toggleStay(stop.id, place);
+      toast(t(added ? 'route.stayAdded' : 'route.stayRemoved', { name: placeName(place), place: stop.name }), added ? { action: { label: t('route.show'), onClick: () => setTab('route') } } : {});
+      setTimeout(refreshOpenPopup, 0);
+    }
+  }, icon(status.saved ? 'check' : 'heart'), el('span', { text: t(status.chosen ? 'route.stayChosenFor' : status.saved ? 'route.stayForDone' : 'route.stayFor', { place: stop.name }) }));
+}
+
+function refreshOpenPopup() {
+  if (state.popupItem && mapView.getOpenPopupId() === state.popupItem.id) {
+    mapView.updatePopup(contentFor(state.popupItem));
+  }
+}
+
+async function findStayFor(stop) {
+  setTab('stays', { fit: false });
+  mapView.closePopup();
+  const result = { lat: stop.lat, lon: stop.lon, kind: 'city', rank: 16, name: stop.name, bounds: null };
+  if (!wideQuery.matches) setSheet('half', false);
+  const plan = mapView.planSearchResult(result);
+  mapView.showSearchResult(result);
+  searchArea({ areaName: stop.name, area: plan });
+}
+
+async function showStay(stay) {
+  if (!wideQuery.matches) setSheet('peek');
+  mapView.closePopup();
+  await mapView.focusPlace(stay);
+  openItemPopup(stay);
+}
+
 function addToRouteButton(item) {
   return el('button', {
     type: 'button',
@@ -655,7 +694,13 @@ function priceSection(place) {
   if (!place.name) return null;
   const query = [place.name, place.city].filter(Boolean).join(', ');
   const lang = getLanguage();
-  const booking = `https://www.booking.com/searchresults.html?${new URLSearchParams({ ss: query, lang: { de: 'de', en: 'en-gb', es: 'es' }[lang] || 'en-gb' })}`;
+  const dates = stayDatesFor(place);
+  const bookingParams = new URLSearchParams({ ss: query, lang: { de: 'de', en: 'en-gb', es: 'es' }[lang] || 'en-gb' });
+  if (dates) {
+    bookingParams.set('checkin', dates.checkin);
+    bookingParams.set('checkout', dates.checkout);
+  }
+  const booking = `https://www.booking.com/searchresults.html?${bookingParams}`;
   const google = `https://www.google.com/travel/search?${new URLSearchParams({ q: query, hl: lang })}`;
   const button = (href, label, extra = '') => el('a', { class: `btn btn--secondary${extra}`, href, target: '_blank', rel: 'noopener noreferrer', title: t('prices.note') },
     el('span', { text: label }), icon('external'));
@@ -707,7 +752,7 @@ function popupContent(place) {
       description ? el('p', { class: 'popup__desc', text: description }) : null,
       contactRows(place),
       priceSection(place),
-      addToRouteButton(place),
+      stayButton(place) || addToRouteButton(place),
       routeButton(place)));
   if (figure) loadPhoto(place, figure);
   return content;
@@ -1263,7 +1308,10 @@ function init() {
     },
     onShow: () => {
       if (state.tab !== 'route') setTab('route', { fit: false });
-    }
+    },
+    onFindStay: findStayFor,
+    onShowStay: showStay,
+    onStaysChanged: refreshOpenPopup
   });
   renderAll();
   initSheet();

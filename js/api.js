@@ -587,6 +587,7 @@ const routeCache = new Map();
 const reverseCache = new Map();
 
 export const TRANSIT_MODES = {
+  all: ['TRANSIT'],
   bus: ['BUS', 'COACH', 'TRAM', 'SUBWAY'],
   train: ['HIGHSPEED_RAIL', 'LONG_DISTANCE', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'REGIONAL_RAIL', 'RAIL', 'SUBURBAN', 'SUBWAY', 'TRAM', 'BUS'],
   ferry: ['FERRY', 'BUS', 'TRAM', 'SUBWAY', 'REGIONAL_RAIL', 'SUBURBAN']
@@ -682,16 +683,17 @@ function transitLeg(leg) {
   };
 }
 
-export async function routeTransit(mode, from, to, signal = null) {
-  const key = `transit|${mode}|${pointKey(from)}|${pointKey(to)}`;
+export async function routeTransit(mode, from, to, signal = null, time = null) {
+  const when = time instanceof Date && time.getTime() > Date.now() ? time : new Date();
+  const key = `transit|${mode}|${pointKey(from)}|${pointKey(to)}|${when.toISOString().slice(0, 13)}`;
   const hit = cached(key);
   if (hit) return hit;
   const params = new URLSearchParams({
     fromPlace: `${from.lat.toFixed(6)},${from.lon.toFixed(6)}`,
     toPlace: `${to.lat.toFixed(6)},${to.lon.toFixed(6)}`,
-    time: new Date().toISOString(),
+    time: when.toISOString(),
     transitModes: TRANSIT_MODES[mode].join(','),
-    numItineraries: '3'
+    numItineraries: mode === 'all' ? '6' : '3'
   });
   let data = null;
   for (const version of TRANSITOUS_VERSIONS) {
