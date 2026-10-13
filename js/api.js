@@ -10,7 +10,7 @@ const NOMINATIM_INTERVAL = 1100;
 const CACHE_TTL = 12 * 60 * 60 * 1000;
 const CACHE_SIZE = 40;
 const BBOX_PADDING = 0.1;
-const FIRST_TIMEOUT = 20000;
+const FIRST_TIMEOUT = 24000;
 const RETRY_TIMEOUT = 35000;
 const PERSIST_KEY = 'areaCache';
 const PERSIST_MAX = 4;
@@ -45,15 +45,19 @@ let lastNominatimCall = 0;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function request(url, options = {}, timeout = 30000) {
+async function request(url, options = {}, timeout = 30000, signal = null) {
+  if (signal && signal.aborted) throw new ApiError('aborted');
   if (navigator.onLine === false) throw new ApiError('offline');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const cancel = () => controller.abort();
+  if (signal) signal.addEventListener('abort', cancel, { once: true });
   try {
     let response;
     try {
       response = await fetch(url, { ...options, signal: controller.signal });
     } catch (error) {
+      if (signal && signal.aborted) throw new ApiError('aborted');
       if (error.name === 'AbortError') throw new ApiError('timeout');
       throw new ApiError(navigator.onLine === false ? 'offline' : 'network');
     }
@@ -63,11 +67,13 @@ async function request(url, options = {}, timeout = 30000) {
     try {
       return await response.json();
     } catch (error) {
+      if (signal && signal.aborted) throw new ApiError('aborted');
       if (error.name === 'AbortError') throw new ApiError('timeout');
       throw new ApiError('server', response.status);
     }
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', cancel);
   }
 }
 
@@ -154,12 +160,12 @@ function buildQuery(categories, bounds) {
   const box = [bounds.south, bounds.west, bounds.north, bounds.east].map((value) => value.toFixed(5)).join(',');
   const parts = categories.map((category, index) => {
     const { key, values, limit } = CATEGORIES[category];
-    return `nwr["${key}"~"^(${values.join('|')})$"](${box})->.s${index};.s${index} out tags center ${limit};`;
+    return `nwr["${key}"~"^(${values.join('|')})$"](${box})->.s${index};.s${index} out tags center qt ${limit};`;
   });
-  return `[out:json][timeout:25];${parts.join('')}`;
+  return `[out:json][timeout:22];${parts.join('')}`;
 }
 
-async function queryOverpass(query) {
+async function queryOverpass(query, signal) {
   let lastError = null;
   const order = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
   for (const [attempt, index] of order.entries()) {
@@ -168,7 +174,7 @@ async function queryOverpass(query) {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
         body: `data=${encodeURIComponent(query)}`
-      }, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT);
+      }, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT, signal);
       const remark = String(data.remark || '');
       if (/timed out|timeout/i.test(remark)) throw new ApiError('timeout');
       if (/out of memory|too many|rate_limited/i.test(remark)) throw new ApiError('busy');
@@ -179,7 +185,7 @@ async function queryOverpass(query) {
       return Array.isArray(data.elements) ? data.elements : [];
     } catch (error) {
       lastError = error instanceof ApiError ? error : new ApiError('server');
-      if (lastError.code === 'offline') break;
+      if (lastError.code === 'offline' || lastError.code === 'aborted') break;
     }
   }
   throw lastError || new ApiError('server');
@@ -211,7 +217,7 @@ function findCached(category, bounds) {
     && (!entry.truncated || contains(bounds, entry.query)));
 }
 
-export async function fetchCategories(categories, bounds) {
+export async function fetchCategories(categories, bounds, { signal = null } = {}) {
   const now = Date.now();
   for (let i = overpassCache.length - 1; i >= 0; i -= 1) {
     if (now - overpassCache[i].time > CACHE_TTL) overpassCache.splice(i, 1);
@@ -227,7 +233,7 @@ export async function fetchCategories(categories, bounds) {
   if (!missing.length) return result;
 
   const padded = padBounds(bounds);
-  const elements = await queryOverpass(buildQuery(missing, padded));
+  const elements = await queryOverpass(buildQuery(missing, padded), signal);
   const grouped = Object.fromEntries(missing.map((category) => [category, new Map()]));
   for (const element of elements) {
     const tags = element.tags || {};

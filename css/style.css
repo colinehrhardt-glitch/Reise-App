@@ -868,6 +868,17 @@ svg {
   min-width: 0;
 }
 
+.retry-row {
+  display: flex;
+  justify-content: center;
+  padding: 0 18px;
+}
+
+.retry-row .btn {
+  margin: -8px 0 20px;
+  padding: 0 22px;
+}
+
 .place--skeleton .place__main {
   cursor: default;
 }

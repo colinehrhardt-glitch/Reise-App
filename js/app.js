@@ -28,6 +28,8 @@ const state = {
   popupItem: null,
   lastSearch: null,
   areaName: null,
+  areaController: null,
+  loadFailed: null,
   sheet: 'peek',
   searchToken: 0,
   favorites: sanitizeFavorites(load('favorites', {})),
@@ -380,7 +382,7 @@ function truncatedNotice() {
   toast(t('results.truncated'), { duration: 6000 });
 }
 
-async function loadPoiLayer(category, area = null) {
+async function loadPoiLayer(category, area = null, signal = null) {
   if (!area && mapView.getZoom() < MIN_SEARCH_ZOOM) {
     toast(t('layers.zoomIn'));
     return;
@@ -388,11 +390,13 @@ async function loadPoiLayer(category, area = null) {
   const bounds = area || mapView.getBounds();
   beginRequest();
   try {
-    const data = await fetchCategories([category], bounds);
+    const data = await fetchCategories([category], bounds, { signal });
+    if (signal && signal.aborted) return;
     state.poi[category] = data[category].items;
     renderPoi(category);
     if (data[category].truncated) truncatedNotice();
   } catch (error) {
+    if (error.code === 'aborted' || (signal && signal.aborted)) return;
     toast(errorMessage(error), {
       type: 'error',
       duration: 8000,
@@ -511,7 +515,9 @@ function renderResults() {
   const visible = filteredPlaces();
   dom.resultsCount.textContent = state.searched ? tCount('results.count', visible.length) : '';
   let empty = '';
-  if (!state.searched) empty = t('results.initial');
+  dom.resultsRetry.hidden = !state.loadFailed;
+  if (state.loadFailed) empty = t('results.failed');
+  else if (!state.searched) empty = t('results.initial');
   else if (!state.places.length) empty = t('results.none');
   else if (!visible.length) empty = t('results.noneFiltered');
   dom.resultsEmpty.textContent = empty;
@@ -794,34 +800,42 @@ function renderLoading(areaName) {
   dom.sheetBody.scrollTop = 0;
 }
 
-async function loadPoiLayers(bounds) {
+async function loadPoiLayers(bounds, signal) {
   for (const category of POI_CATEGORIES.filter((key) => state.layers[key])) {
-    await loadPoiLayer(category, bounds);
+    if (signal.aborted) return;
+    await loadPoiLayer(category, bounds, signal);
   }
 }
 
 async function searchArea({ areaName = null, area = null } = {}) {
-  if (state.areaLoading) return;
   if (!area && mapView.getZoom() < MIN_SEARCH_ZOOM) {
     mapView.zoomInTo(MIN_SEARCH_ZOOM);
     return;
   }
+  if (state.areaController) state.areaController.abort();
+  const controller = new AbortController();
+  state.areaController = controller;
   hideSearchPanel();
   toggleLayers(false);
   const bounds = area ? area.bounds : mapView.getBounds();
   const center = area ? area.center : mapView.getVisibleCenter();
   state.areaLoading = true;
+  state.loadFailed = null;
+  state.places = [];
+  state.areaName = areaName;
+  state.lastSearch = null;
+  renderMarkers();
   updateAreaButton();
   renderLoading(areaName);
   beginRequest();
   let loaded = false;
   try {
-    const data = await fetchCategories(['accommodation'], bounds);
+    const data = await fetchCategories(['accommodation'], bounds, { signal: controller.signal });
+    if (state.areaController !== controller) return;
     state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
     state.places = sortPlaces(data.accommodation.items);
     state.searched = true;
     state.lastSearch = bounds;
-    state.areaName = areaName;
     if (areaName) state.filter = 'all';
     loaded = true;
     renderResults();
@@ -829,18 +843,23 @@ async function searchArea({ areaName = null, area = null } = {}) {
     if (areaName && !wideQuery.matches && state.places.length && state.sheet === 'peek') setSheet('half');
     if (data.accommodation.truncated) truncatedNotice();
   } catch (error) {
+    if (state.areaController !== controller || error.code === 'aborted') return;
+    const retry = () => searchArea({ areaName, area: { bounds, center } });
+    state.loadFailed = retry;
     renderResults();
     toast(errorMessage(error), {
       type: 'error',
       duration: 8000,
-      action: { label: t('common.retry'), onClick: () => searchArea({ areaName, area: { bounds, center } }) }
+      action: { label: t('common.retry'), onClick: retry }
     });
   } finally {
-    state.areaLoading = false;
     endRequest();
-    updateAreaButton();
+    if (state.areaController === controller) {
+      state.areaLoading = false;
+      updateAreaButton();
+    }
   }
-  if (loaded) loadPoiLayers(bounds);
+  if (loaded) loadPoiLayers(bounds, controller.signal);
 }
 
 function showSearchMessage(message, isError = false) {
@@ -1095,6 +1114,9 @@ function bindEvents() {
     dom.searchInput.focus();
   });
   dom.areaBtn.addEventListener('click', () => searchArea());
+  dom.resultsRetry.addEventListener('click', () => {
+    if (state.loadFailed) state.loadFailed();
+  });
   dom.locateBtn.addEventListener('click', () => locate(false));
   dom.layersBtn.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -1154,7 +1176,7 @@ function collectDom() {
     searchClear: 'search-clear', searchPanel: 'search-panel', searchMessage: 'search-message', searchResults: 'search-results',
     areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
     layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
-    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', listToolbar: 'list-toolbar',
+    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
     resultsSort: 'results-sort', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
