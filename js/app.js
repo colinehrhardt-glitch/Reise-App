@@ -10,6 +10,7 @@ const RESULT_SORTS = ['recommended', 'stars', 'distance'];
 const THEMES = ['auto', 'light', 'dark'];
 const SHEET_ORDER = ['peek', 'half', 'full'];
 const PHOTO_KINDS = ['commons', 'wikidata', 'url'];
+const HOSTELWORLD_TYPES = ['hostel', 'guest_house'];
 const wideQuery = window.matchMedia('(min-width: 768px)');
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
@@ -656,11 +657,14 @@ function priceSection(place) {
   const lang = getLanguage();
   const booking = `https://www.booking.com/searchresults.html?${new URLSearchParams({ ss: query, lang: { de: 'de', en: 'en-gb', es: 'es' }[lang] || 'en-gb' })}`;
   const google = `https://www.google.com/travel/search?${new URLSearchParams({ q: query, hl: lang })}`;
-  const button = (href, label) => el('a', { class: 'btn btn--secondary', href, target: '_blank', rel: 'noopener noreferrer', title: t('prices.note') },
+  const button = (href, label, extra = '') => el('a', { class: `btn btn--secondary${extra}`, href, target: '_blank', rel: 'noopener noreferrer', title: t('prices.note') },
     el('span', { text: label }), icon('external'));
+  const hostelworld = HOSTELWORLD_TYPES.includes(place.type)
+    ? button(`https://www.google.com/search?${new URLSearchParams({ q: `site:hostelworld.com ${query}`, hl: lang })}`, 'Hostelworld', ' btn--wide')
+    : null;
   return el('div', { class: 'prices' },
     el('div', { class: 'prices__title' }, icon('tag'), el('span', { text: t('prices.title') })),
-    el('div', { class: 'prices__buttons' }, button(booking, 'Booking.com'), button(google, 'Google')));
+    el('div', { class: 'prices__buttons' }, hostelworld, button(booking, 'Booking.com'), button(google, 'Google')));
 }
 
 async function loadPhoto(item, figure) {
