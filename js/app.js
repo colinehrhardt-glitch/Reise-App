@@ -380,14 +380,15 @@ function truncatedNotice() {
   toast(t('results.truncated'), { duration: 6000 });
 }
 
-async function loadPoiLayer(category) {
-  if (mapView.getZoom() < MIN_SEARCH_ZOOM) {
+async function loadPoiLayer(category, area = null) {
+  if (!area && mapView.getZoom() < MIN_SEARCH_ZOOM) {
     toast(t('layers.zoomIn'));
     return;
   }
+  const bounds = area || mapView.getBounds();
   beginRequest();
   try {
-    const data = await fetchCategories([category], mapView.getBounds());
+    const data = await fetchCategories([category], bounds);
     state.poi[category] = data[category].items;
     renderPoi(category);
     if (data[category].truncated) truncatedNotice();
@@ -395,7 +396,7 @@ async function loadPoiLayer(category) {
     toast(errorMessage(error), {
       type: 'error',
       duration: 8000,
-      action: { label: t('common.retry'), onClick: () => loadPoiLayer(category) }
+      action: { label: t('common.retry'), onClick: () => loadPoiLayer(category, bounds) }
     });
   } finally {
     endRequest();
@@ -775,47 +776,71 @@ function updateAreaButton() {
   dom.areaLabel.textContent = state.areaLoading ? t('area.loading') : zoomedOut ? t('area.zoomIn') : t('area.search');
 }
 
-async function searchArea({ areaName = null } = {}) {
+function skeletonItem() {
+  return el('li', { class: 'place place--skeleton', 'aria-hidden': 'true' },
+    el('span', { class: 'place__main' },
+      el('span', { class: 'type-dot skeleton' }),
+      el('span', { class: 'place__text' },
+        el('span', { class: 'skeleton skeleton--line' }),
+        el('span', { class: 'skeleton skeleton--short' }))));
+}
+
+function renderLoading(areaName) {
+  dom.sheetTitle.textContent = areaName ? t('results.titleIn', { place: areaName }) : t('results.title');
+  dom.resultsCount.textContent = t('area.loading');
+  dom.resultsEmpty.textContent = '';
+  dom.listToolbar.hidden = true;
+  dom.resultsList.replaceChildren(...Array.from({ length: 5 }, skeletonItem));
+  dom.sheetBody.scrollTop = 0;
+}
+
+async function loadPoiLayers(bounds) {
+  for (const category of POI_CATEGORIES.filter((key) => state.layers[key])) {
+    await loadPoiLayer(category, bounds);
+  }
+}
+
+async function searchArea({ areaName = null, area = null } = {}) {
   if (state.areaLoading) return;
-  if (mapView.getZoom() < MIN_SEARCH_ZOOM) {
+  if (!area && mapView.getZoom() < MIN_SEARCH_ZOOM) {
     mapView.zoomInTo(MIN_SEARCH_ZOOM);
     return;
   }
   hideSearchPanel();
   toggleLayers(false);
-  const bounds = mapView.getBounds();
-  const center = mapView.getVisibleCenter();
-  const categories = ['accommodation', ...POI_CATEGORIES.filter((category) => state.layers[category])];
+  const bounds = area ? area.bounds : mapView.getBounds();
+  const center = area ? area.center : mapView.getVisibleCenter();
   state.areaLoading = true;
   updateAreaButton();
+  renderLoading(areaName);
   beginRequest();
+  let loaded = false;
   try {
-    const data = await fetchCategories(categories, bounds);
+    const data = await fetchCategories(['accommodation'], bounds);
     state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
     state.places = sortPlaces(data.accommodation.items);
     state.searched = true;
     state.lastSearch = bounds;
     state.areaName = areaName;
     if (areaName) state.filter = 'all';
-    for (const category of categories.slice(1)) {
-      state.poi[category] = data[category].items;
-      renderPoi(category);
-    }
+    loaded = true;
     renderResults();
     dom.sheetBody.scrollTop = 0;
     if (areaName && !wideQuery.matches && state.places.length && state.sheet === 'peek') setSheet('half');
-    if (categories.some((category) => data[category].truncated)) truncatedNotice();
+    if (data.accommodation.truncated) truncatedNotice();
   } catch (error) {
+    renderResults();
     toast(errorMessage(error), {
       type: 'error',
       duration: 8000,
-      action: { label: t('common.retry'), onClick: () => searchArea({ areaName }) }
+      action: { label: t('common.retry'), onClick: () => searchArea({ areaName, area: { bounds, center } }) }
     });
   } finally {
     state.areaLoading = false;
     endRequest();
     updateAreaButton();
   }
+  if (loaded) loadPoiLayers(bounds);
 }
 
 function showSearchMessage(message, isError = false) {
@@ -847,8 +872,14 @@ async function chooseSearchResult(result) {
   dom.searchInput.blur();
   mapView.closePopup();
   const local = mapView.searchResultZoom(result) !== null || !result.bounds;
-  if (!wideQuery.matches) setSheet(local ? 'half' : 'peek');
-  await mapView.showSearchResult(result);
+  if (!wideQuery.matches) setSheet(local ? 'half' : 'peek', false);
+  const plan = mapView.planSearchResult(result);
+  const moving = mapView.showSearchResult(result);
+  if (plan) {
+    searchArea({ areaName: result.name, area: plan });
+    return;
+  }
+  await moving;
   if (mapView.getZoom() >= MIN_SEARCH_ZOOM) searchArea({ areaName: result.name });
   else toast(t('search.zoomHint'), { duration: 5000 });
 }

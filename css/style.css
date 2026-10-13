@@ -868,6 +868,33 @@ svg {
   min-width: 0;
 }
 
+.place--skeleton .place__main {
+  cursor: default;
+}
+
+.skeleton {
+  display: block;
+  border-radius: 8px;
+  background: linear-gradient(100deg, var(--surface-2) 20%, var(--surface-3) 50%, var(--surface-2) 80%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+
+.type-dot.skeleton {
+  border-radius: 50%;
+}
+
+.skeleton--line {
+  width: min(190px, 60vw);
+  height: 16px;
+  margin-bottom: 6px;
+}
+
+.skeleton--short {
+  width: 110px;
+  height: 12px;
+}
+
 .top-badge {
   flex: none;
   padding: 2px 8px;

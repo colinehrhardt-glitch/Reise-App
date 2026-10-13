@@ -1,3 +1,5 @@
+import { load, save } from './storage.js';
+
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 const WIKIDATA_URL = 'https://www.wikidata.org/w/api.php';
 const OVERPASS_URLS = [
@@ -5,9 +7,14 @@ const OVERPASS_URLS = [
   'https://overpass.private.coffee/api/interpreter'
 ];
 const NOMINATIM_INTERVAL = 1100;
-const CACHE_TTL = 30 * 60 * 1000;
+const CACHE_TTL = 12 * 60 * 60 * 1000;
 const CACHE_SIZE = 40;
-const BBOX_PADDING = 0.15;
+const BBOX_PADDING = 0.1;
+const FIRST_TIMEOUT = 20000;
+const RETRY_TIMEOUT = 35000;
+const PERSIST_KEY = 'areaCache';
+const PERSIST_MAX = 4;
+const PERSIST_ITEMS = 1500;
 
 export const ACCOMMODATION_TYPES = ['hotel', 'hostel', 'guest_house', 'apartment', 'motel'];
 
@@ -32,7 +39,8 @@ export class ApiError extends Error {
 
 const nominatimCache = new Map();
 const photoCache = new Map();
-const overpassCache = [];
+const overpassCache = restoreCache();
+let preferredEndpoint = Math.min(OVERPASS_URLS.length - 1, Math.max(0, Number(load('overpassEndpoint', 0)) || 0));
 let lastNominatimCall = 0;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,7 +86,7 @@ export async function searchPlaces(query, lang) {
     'accept-language': lang
   });
   const data = await request(`${NOMINATIM_URL}?${params}`, { headers: { Accept: 'application/json' } }, 15000);
-  const results = (Array.isArray(data) ? data : []).map(normalizeSearchResult).filter(Boolean);
+  const results = dedupeResults((Array.isArray(data) ? data : []).map(normalizeSearchResult).filter(Boolean));
   nominatimCache.set(key, results);
   return results;
 }
@@ -104,6 +112,23 @@ function normalizeSearchResult(item) {
       ? { south: box[0], north: box[1], west: box[2], east: box[3] }
       : null
   };
+}
+
+function roughKm(a, b) {
+  const x = (b.lon - a.lon) * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+  const y = b.lat - a.lat;
+  return Math.sqrt(x * x + y * y) * 111.2;
+}
+
+function dedupeResults(results) {
+  const kept = [];
+  for (const result of results) {
+    const name = result.name.toLowerCase();
+    const duplicate = kept.some((other) => other.name.toLowerCase() === name
+      && (other.detail === result.detail || roughKm(other, result) < 15));
+    if (!duplicate) kept.push(result);
+  }
+  return kept;
 }
 
 function padBounds(bounds) {
@@ -136,16 +161,21 @@ function buildQuery(categories, bounds) {
 
 async function queryOverpass(query) {
   let lastError = null;
-  for (const url of OVERPASS_URLS) {
+  const order = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
+  for (const [attempt, index] of order.entries()) {
     try {
-      const data = await request(url, {
+      const data = await request(OVERPASS_URLS[index], {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
         body: `data=${encodeURIComponent(query)}`
-      }, 35000);
+      }, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT);
       const remark = String(data.remark || '');
       if (/timed out|timeout/i.test(remark)) throw new ApiError('timeout');
       if (/out of memory|too many|rate_limited/i.test(remark)) throw new ApiError('busy');
+      if (index !== preferredEndpoint) {
+        preferredEndpoint = index;
+        save('overpassEndpoint', index);
+      }
       return Array.isArray(data.elements) ? data.elements : [];
     } catch (error) {
       lastError = error instanceof ApiError ? error : new ApiError('server');
@@ -153,6 +183,26 @@ async function queryOverpass(query) {
     }
   }
   throw lastError || new ApiError('server');
+}
+
+function validBounds(value) {
+  return value && ['south', 'north', 'west', 'east'].every((key) => Number.isFinite(value[key]));
+}
+
+function restoreCache() {
+  const raw = load(PERSIST_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  const now = Date.now();
+  return raw.filter((entry) => entry && entry.category === 'accommodation'
+    && validBounds(entry.bounds) && validBounds(entry.query) && Array.isArray(entry.items)
+    && Number.isFinite(entry.time) && now - entry.time < CACHE_TTL);
+}
+
+function persistCache() {
+  const entries = overpassCache
+    .filter((entry) => entry.category === 'accommodation' && entry.items.length <= PERSIST_ITEMS)
+    .slice(-PERSIST_MAX);
+  while (entries.length && !save(PERSIST_KEY, entries)) entries.shift();
 }
 
 function findCached(category, bounds) {
@@ -197,6 +247,7 @@ export async function fetchCategories(categories, bounds) {
     result[category] = { items: items.filter((item) => isInside(item, bounds)), truncated };
   }
   while (overpassCache.length > CACHE_SIZE) overpassCache.shift();
+  if (missing.includes('accommodation')) persistCache();
   return result;
 }
 

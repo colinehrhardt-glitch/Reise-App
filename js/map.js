@@ -307,16 +307,43 @@ function spanKm(bounds) {
   return a.distanceTo(b) / 1000;
 }
 
+function cityZoom() {
+  const size = map.getSize();
+  const width = size.x - insets.left - insets.right;
+  const height = size.y - insets.top - insets.bottom;
+  const extra = Math.round(Math.log2(Math.max(width, height, 1) / 520));
+  return Math.min(15, Math.max(13, 13 + extra));
+}
+
 export function searchResultZoom(result) {
-  if (CITY_KINDS.includes(result.kind)) return 13;
-  if (TOWN_KINDS.includes(result.kind)) return 14;
-  if (VILLAGE_KINDS.includes(result.kind)) return 15;
+  if (VILLAGE_KINDS.includes(result.kind)) return Math.max(15, cityZoom());
+  if (TOWN_KINDS.includes(result.kind)) return Math.max(14, cityZoom());
+  if (CITY_KINDS.includes(result.kind)) return cityZoom();
   if (result.rank >= 26) return 17;
-  if (result.rank >= 20) return 15;
-  if (result.rank >= 17) return 14;
-  if (result.rank >= 16) return 13;
-  if (result.bounds && spanKm(result.bounds) <= 60) return 13;
+  if (result.rank >= 20) return Math.max(15, cityZoom());
+  if (result.rank >= 17) return Math.max(14, cityZoom());
+  if (result.rank >= 11) return cityZoom();
+  if (result.bounds && spanKm(result.bounds) <= 60) return cityZoom();
   return null;
+}
+
+export function boundsAt(lat, lon, zoom) {
+  const size = map.getSize();
+  const origin = map.project(centerFor(L.latLng(lat, lon), zoom), zoom).subtract(size.divideBy(2));
+  const topLeft = map.unproject(origin.add([insets.left, insets.top]), zoom);
+  const bottomRight = map.unproject(origin.add([size.x - insets.right, Math.max(insets.top + 1, size.y - insets.bottom)]), zoom);
+  return {
+    south: Math.max(-90, bottomRight.lat),
+    north: Math.min(90, topLeft.lat),
+    west: Math.max(-180, topLeft.lng),
+    east: Math.min(180, bottomRight.lng)
+  };
+}
+
+export function planSearchResult(result) {
+  const zoom = searchResultZoom(result);
+  if (zoom === null) return null;
+  return { zoom, bounds: boundsAt(result.lat, result.lon, zoom), center: { lat: result.lat, lon: result.lon } };
 }
 
 export function showSearchResult(result) {
