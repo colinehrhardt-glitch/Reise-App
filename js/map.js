@@ -176,6 +176,7 @@ export function initMap(container, options = {}) {
   favoritesLayer = L.layerGroup().addTo(map);
   routeRenderer = L.svg({ padding: 1.5 });
   routeLayer = L.featureGroup().addTo(map);
+  map.on('zoomend moveend', scheduleRouteRedraw);
 
   map.on('moveend zoomend', () => handlers.onViewChange?.());
   map.on('click', () => handlers.onMapClick?.());
@@ -602,96 +603,99 @@ function stopIcon(label, start) {
   });
 }
 
-function pathLength(coords) {
-  let total = 0;
-  for (let i = 1; i < coords.length; i += 1) total += L.latLng(coords[i - 1]).distanceTo(L.latLng(coords[i]));
-  return total;
-}
+const ARROW_SPACING = 24;
+const ARROW_LIMIT = 2500;
+const ARROW_SHAPE = [[-7, -6], [1, -6], [8, 0], [1, 6], [-7, 6], [-1.5, 0]];
+const TERMINAL_ICONS = { airport: 'flight', bus_station: 'bus', train_station: 'train', ferry_terminal: 'ferry' };
+let routeData = null;
+let routeRedraw = 0;
 
-function pointAt(coords, fraction) {
-  const target = pathLength(coords) * fraction;
-  let travelled = 0;
-  for (let i = 1; i < coords.length; i += 1) {
-    const a = L.latLng(coords[i - 1]);
-    const b = L.latLng(coords[i]);
-    const step = a.distanceTo(b);
-    if (travelled + step >= target && step > 0) {
-      const f = (target - travelled) / step;
-      const lat = a.lat + (b.lat - a.lat) * f;
-      const lng = a.lng + (b.lng - a.lng) * f;
-      const pa = L.CRS.EPSG3857.latLngToPoint(a, 0);
-      const pb = L.CRS.EPSG3857.latLngToPoint(b, 0);
-      return { latlng: [lat, lng], angle: Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180 / Math.PI };
-    }
-    travelled += step;
-  }
-  return null;
-}
-
-function arrowIcon(color, angle) {
+function terminalIcon(terminal) {
+  const full = String(terminal.iata || terminal.label || '').replace(/[<>&"]/g, '');
+  const label = terminal.iata || map.getZoom() >= 12 ? full : '';
   return L.divIcon({
     className: 'marker-icon',
-    html: `<div class="route-arrow" style="--c:${color};transform:rotate(${angle.toFixed(1)}deg)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 6.5 16 12l-7.5 5.5z"/></svg></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9]
-  });
-}
-
-function airportIcon(code) {
-  return L.divIcon({
-    className: 'marker-icon',
-    html: `<div class="route-airport"><span class="route-airport__dot"></span><span class="route-airport__label">${svg('flight')}<span>${code}</span></span></div>`,
+    html: `<div class="route-terminal route-terminal--${terminal.kind}"><span class="route-terminal__dot"></span><span class="route-terminal__label${label ? '' : ' is-compact'}">${svg(TERMINAL_ICONS[terminal.kind] || 'place')}${label ? `<span>${label}</span>` : ''}</span></div>`,
     iconSize: [12, 12],
     iconAnchor: [6, 6]
   });
 }
 
-function drawLine(coords, style, options = {}) {
-  L.polyline(coords, { renderer: routeRenderer, color: '#ffffff', weight: options.weight + 3, opacity: 0.9, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(routeLayer);
-  return L.polyline(coords, {
-    renderer: routeRenderer,
-    color: style.color,
-    weight: options.weight,
-    opacity: options.opacity,
-    dashArray: options.dash || null,
-    lineCap: 'round',
-    lineJoin: 'round',
-    smoothFactor: 1.5
-  }).addTo(routeLayer);
-}
-
-function addArrows(coords, color, index) {
-  const length = pathLength(coords);
-  if (length < 300) return;
-  const fractions = length > 400000 ? [0.25, 0.5, 0.75] : [0.5];
-  for (const fraction of fractions) {
-    const spot = pointAt(coords, fraction);
-    if (!spot) continue;
-    const marker = L.marker(spot.latlng, { icon: arrowIcon(color, spot.angle), keyboard: false, zIndexOffset: 900 }).addTo(routeLayer);
-    marker.on('click', () => routeHandlers.onLegClick?.(index));
+function arrowRings(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return [];
+  const size = map.getSize();
+  const pad = 200;
+  const view = L.bounds(map.containerPointToLayerPoint([-pad, -pad]), map.containerPointToLayerPoint([size.x + pad, size.y + pad]));
+  const points = coords.map((point) => map.latLngToLayerPoint(point));
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) total += points[i - 1].distanceTo(points[i]);
+  const rings = [];
+  if (total < 4) return rings;
+  const spacing = total < ARROW_SPACING * 1.5 ? total : ARROW_SPACING;
+  let next = total < ARROW_SPACING * 1.5 ? total / 2 : ARROW_SPACING / 2;
+  let travelled = 0;
+  for (let i = 1; i < points.length && rings.length < ARROW_LIMIT; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const step = a.distanceTo(b);
+    if (step === 0) continue;
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    while (next <= travelled + step && rings.length < ARROW_LIMIT) {
+      const f = (next - travelled) / step;
+      const x = a.x + (b.x - a.x) * f;
+      const y = a.y + (b.y - a.y) * f;
+      if (view.contains([x, y])) {
+        rings.push(ARROW_SHAPE.map(([px, py]) => map.layerPointToLatLng([x + px * cos - py * sin, y + px * sin + py * cos])));
+      }
+      next += spacing;
+    }
+    travelled += step;
   }
+  return rings;
 }
 
-export function renderRoute(points, legs) {
+function drawRoute() {
   routeLayer.clearLayers();
+  if (!routeData) return;
+  const { points, legs } = routeData;
   legs.forEach((leg, index) => {
     if (!leg) return;
     const style = ROUTE_MODES[leg.mode] || ROUTE_MODES.car;
     const segments = Array.isArray(leg.segments) && leg.segments.length ? leg.segments : [{ coords: leg.coords, kind: 'main' }];
     for (const segment of segments) {
       if (!Array.isArray(segment.coords) || segment.coords.length < 2) continue;
-      const ground = segment.kind === 'ground';
-      const line = drawLine(segment.coords, ground ? { color: '#868e96' } : style, {
-        weight: ground ? 3 : 4.5,
-        opacity: ground ? 0.85 : leg.estimate ? 0.75 : 0.95,
-        dash: ground ? '2 7' : style.dash || (leg.estimate ? '10 8' : null)
-      });
-      line.on('click', () => routeHandlers.onLegClick?.(index));
-      if (!ground) addArrows(segment.coords, style.color, index);
+      if (segment.kind === 'ground') {
+        const line = L.polyline(segment.coords, {
+          renderer: routeRenderer,
+          color: '#495057',
+          weight: 3.5,
+          opacity: 0.8,
+          dashArray: '1 8',
+          lineCap: 'round'
+        }).addTo(routeLayer);
+        line.on('click', () => routeHandlers.onLegClick?.(index));
+        continue;
+      }
+      const rings = arrowRings(segment.coords);
+      if (!rings.length) continue;
+      const arrows = L.polygon(rings, {
+        renderer: routeRenderer,
+        color: '#ffffff',
+        weight: 1.6,
+        fillColor: style.color,
+        fillOpacity: leg.estimate ? 0.6 : 1,
+        opacity: 1,
+        smoothFactor: 0,
+        noClip: true,
+        lineJoin: 'round'
+      }).addTo(routeLayer);
+      arrows.on('click', () => routeHandlers.onLegClick?.(index));
     }
-    for (const airport of leg.airports || []) {
-      if (!airport) continue;
-      L.marker([airport.lat, airport.lon], { icon: airportIcon(airport.iata), keyboard: false, zIndexOffset: 1000, title: airport.name || airport.iata }).addTo(routeLayer);
+    for (const terminal of leg.terminals || []) {
+      if (!terminal) continue;
+      L.marker([terminal.lat, terminal.lon], { icon: terminalIcon(terminal), keyboard: false, zIndexOffset: 1000, title: terminal.name || terminal.label || '' }).addTo(routeLayer);
     }
   });
   points.forEach((point, index) => {
@@ -703,6 +707,17 @@ export function renderRoute(points, legs) {
     }).addTo(routeLayer);
     marker.on('click', () => routeHandlers.onStopClick?.(index));
   });
+}
+
+function scheduleRouteRedraw() {
+  if (!routeData) return;
+  cancelAnimationFrame(routeRedraw);
+  routeRedraw = requestAnimationFrame(drawRoute);
+}
+
+export function renderRoute(points, legs) {
+  routeData = { points, legs };
+  drawRoute();
 }
 
 export function fitCoords(coords, maxZoom = 14) {

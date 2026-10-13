@@ -1,6 +1,6 @@
 import { t, tCount, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
-import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport } from './api.js';
+import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearestStation } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
 
@@ -36,6 +36,7 @@ const state = {
   auto: {},
   results: {},
   options: {},
+  transfers: {},
   picker: null,
   expanded: null,
   stayOpen: null,
@@ -254,6 +255,9 @@ function mainMode(itinerary) {
   return best ? best.mode : null;
 }
 
+const TERMINAL_KIND = { bus: 'bus_station', train: 'train_station', flight: 'airport', ferry: 'ferry_terminal' };
+const TERMINAL_ICON = { bus_station: 'bus', train_station: 'train', airport: 'flight', ferry_terminal: 'ferry' };
+
 function partCoords(part) {
   if (part.mode !== 'AIRPLANE' || part.coords.length < 2) return part.coords;
   const first = part.coords[0];
@@ -261,19 +265,30 @@ function partCoords(part) {
   return mapView.arcCoords({ lat: first[0], lon: first[1] }, { lat: last[0], lon: last[1] });
 }
 
-function transitResult(itineraries, a, b) {
+function terminalFromPart(part, end, kind) {
+  const point = end === 'from' ? part.coords[0] : part.coords[part.coords.length - 1];
+  if (!point) return null;
+  const name = (end === 'from' ? part.from : part.to) || '';
+  return { kind, name, label: name.length > 22 ? `${name.slice(0, 21)}…` : name, lat: point[0], lon: point[1] };
+}
+
+function transitResult(itineraries, a, b, mode) {
   const best = itineraries[0];
   const segments = best.legs
     .filter((part) => part.coords.length > 1)
     .map((part) => ({ kind: part.mode === 'WALK' ? 'ground' : 'main', coords: partCoords(part) }));
   const coords = segments.flatMap((segment) => segment.coords);
   const travelled = best.legs.reduce((sum, part) => sum + part.distance, 0);
+  const rides = best.legs.filter((part) => part.mode !== 'WALK' && part.coords.length > 1);
+  const kind = TERMINAL_KIND[mode] || 'bus_station';
+  const terminals = rides.length ? [terminalFromPart(rides[0], 'from', kind), terminalFromPart(rides[rides.length - 1], 'to', kind)] : null;
   return {
     status: 'ok',
     distance: travelled || distance(a, b),
     duration: best.duration,
     coords: coords.length > 1 ? coords : straight(a, b),
     segments: segments.length ? segments : null,
+    terminals: terminals && terminals.every(Boolean) ? terminals : null,
     itineraries
   };
 }
@@ -283,38 +298,84 @@ function flightEstimate(a, b) {
   return { status: 'estimate', distance: km * 1000, duration: (km / 800 + 0.5) * 3600, coords: mapView.arcCoords(a, b), note: 'route.flightNote' };
 }
 
-async function airportFor(point, signal) {
+async function safely(task) {
   try {
-    return await nearestAirport(point, signal);
+    return await task();
   } catch (error) {
     if (error.code === 'aborted') throw error;
     return null;
   }
 }
 
-async function computeFlight(a, b, signal) {
-  const from = await airportFor(a, signal);
-  const to = await airportFor(b, signal);
+function withTerminals(a, b, from, to, main, extra) {
+  return {
+    coords: [[a.lat, a.lon], ...main, [b.lat, b.lon]],
+    segments: [
+      { kind: 'ground', coords: [[a.lat, a.lon], [from.lat, from.lon]] },
+      { kind: 'main', coords: main },
+      { kind: 'ground', coords: [[to.lat, to.lon], [b.lat, b.lon]] }
+    ],
+    terminals: [from, to],
+    ...extra
+  };
+}
+
+async function computeFlight(a, b) {
+  const from = await safely(() => nearestAirport(a));
+  const to = await safely(() => nearestAirport(b));
   if (!from || !to || from.iata === to.iata) return flightEstimate(a, b);
   const air = distance(from, to);
   const groundA = distance(a, from);
   const groundB = distance(to, b);
   const flightTime = (air / 1000 / 800 + 0.5) * 3600;
   const groundTime = ((groundA + groundB) / 1000 / 35) * 3600;
-  const arc = mapView.arcCoords(from, to);
   return {
     status: 'estimate',
     distance: air + groundA + groundB,
     duration: flightTime + groundTime + 5400,
     flightTime,
-    coords: [[a.lat, a.lon], ...arc, [b.lat, b.lon]],
-    segments: [
-      { kind: 'ground', coords: [[a.lat, a.lon], [from.lat, from.lon]] },
-      { kind: 'main', coords: arc },
-      { kind: 'ground', coords: [[to.lat, to.lon], [b.lat, b.lon]] }
-    ],
     airports: [from, to],
-    note: 'route.flightNoteAirports'
+    note: 'route.flightNoteAirports',
+    ...withTerminals(a, b, from, to, mapView.arcCoords(from, to))
+  };
+}
+
+async function stationsFor(a, b, type, signal) {
+  const from = await safely(() => nearestStation(a, type, signal));
+  if (!from) return null;
+  const to = await safely(() => nearestStation(b, type, signal));
+  if (!to || distance(from, to) < 2000) return null;
+  return [from, to];
+}
+
+async function stationEstimate(a, b, mode, signal, road = null) {
+  const type = mode === 'train' ? 'train' : 'bus';
+  const stations = await stationsFor(a, b, type, signal);
+  if (!stations) {
+    if (mode === 'bus' && road) return busEstimate(road);
+    return null;
+  }
+  const [from, to] = stations;
+  const ground = ((distance(a, from) + distance(to, b)) / 1000 / 30) * 3600;
+  if (mode === 'bus') {
+    const between = await safely(() => routeStreet('car', from, to, signal));
+    const base = between || road;
+    if (!base) return null;
+    return {
+      status: 'estimate',
+      distance: base.distance,
+      duration: base.duration * 1.35 + ground,
+      note: 'route.busStationNote',
+      ...withTerminals(a, b, from, to, between ? between.coords : base.coords)
+    };
+  }
+  const km = distance(from, to) / 1000;
+  return {
+    status: 'estimate',
+    distance: km * 1250,
+    duration: (km * 1.25 / 80) * 3600 + ground,
+    note: 'route.trainStationNote',
+    ...withTerminals(a, b, from, to, straight(from, to))
   };
 }
 
@@ -331,22 +392,14 @@ async function computeOptions(leg, signal) {
   const { a, b, time } = leg;
   const km = distance(a, b) / 1000;
   const found = new Map();
-  const attempt = async (task) => {
-    try {
-      return await task();
-    } catch (error) {
-      if (error.code === 'aborted') throw error;
-      return null;
-    }
-  };
   if (km <= 12) {
-    const walk = await attempt(() => routeStreet('walk', a, b, signal));
+    const walk = await safely(() => routeStreet('walk', a, b, signal));
     if (walk) found.set('walk', { status: 'ok', distance: walk.distance, duration: walk.duration, coords: walk.coords });
   }
-  const road = await attempt(() => routeStreet('car', a, b, signal));
+  const road = await safely(() => routeStreet('car', a, b, signal));
   if (road) found.set('car', { status: 'ok', distance: road.distance, duration: road.duration, coords: road.coords });
   if (km >= 1) {
-    const itineraries = (await attempt(() => routeTransit('all', a, b, signal, time))) || [];
+    const itineraries = (await safely(() => routeTransit('all', a, b, signal, time))) || [];
     const groups = {};
     for (const itinerary of itineraries) {
       const mode = mainMode(itinerary);
@@ -355,12 +408,19 @@ async function computeOptions(leg, signal) {
     }
     for (const [mode, list] of Object.entries(groups)) {
       list.sort((x, y) => x.duration - y.duration);
-      found.set(mode, transitResult(list, a, b));
+      found.set(mode, transitResult(list, a, b, mode));
     }
   }
-  if (!found.has('bus') && road && km >= 3) found.set('bus', busEstimate(road));
+  if (!found.has('bus') && road && km >= 3) {
+    const bus = km >= 20 ? await stationEstimate(a, b, 'bus', signal, road) : busEstimate(road);
+    if (bus) found.set('bus', bus);
+  }
+  if (!found.has('train') && km >= 30 && km <= 1500) {
+    const train = await stationEstimate(a, b, 'train', signal);
+    if (train) found.set('train', train);
+  }
   if (!found.has('ferry') && !road && km < 600) found.set('ferry', ferryEstimate(a, b));
-  if (!found.has('flight') && (km >= 250 || (!road && km >= 600))) found.set('flight', await computeFlight(a, b, signal));
+  if (!found.has('flight') && (km >= 250 || (!road && km >= 600))) found.set('flight', await computeFlight(a, b));
   return MODES.filter((mode) => found.has(mode))
     .map((mode) => ({ mode, ...found.get(mode) }))
     .sort((x, y) => x.duration - y.duration);
@@ -370,6 +430,102 @@ function straight(a, b) {
   return [[a.lat, a.lon], [b.lat, b.lon]];
 }
 
+function originOf(point) {
+  const source = point.holder ? holder('start') : point.start ? null : state.stops.find((stop) => stop.id === point.key);
+  const stay = source && source.chosen ? source.stays.find((item) => item.id === source.chosen) : null;
+  if (stay) return { lat: stay.lat, lon: stay.lon, name: stay.name || t('place.unnamed'), stay: true };
+  return { lat: point.lat, lon: point.lon, name: point.linkName || point.name, stay: false };
+}
+
+function transferKey(leg, end) {
+  const result = leg.result;
+  const terminal = result.terminals[end === 'depart' ? 0 : 1];
+  const origin = originOf(end === 'depart' ? leg.a : leg.b);
+  return `${end}|${origin.lat.toFixed(4)},${origin.lon.toFixed(4)}|${terminal.lat.toFixed(4)},${terminal.lon.toFixed(4)}`;
+}
+
+async function computeTransfer(from, to) {
+  const car = await safely(() => routeStreet('car', from, to));
+  const walk = distance(from, to) <= 3500 ? await safely(() => routeStreet('walk', from, to)) : null;
+  return { status: 'ok', car, walk };
+}
+
+function ensureTransfers(leg) {
+  if (!leg.result || !leg.result.terminals) return;
+  for (const end of ['depart', 'arrive']) {
+    const key = transferKey(leg, end);
+    if (state.transfers[key]) continue;
+    const origin = originOf(end === 'depart' ? leg.a : leg.b);
+    const terminal = leg.result.terminals[end === 'depart' ? 0 : 1];
+    const [from, to] = end === 'depart' ? [origin, terminal] : [terminal, origin];
+    state.transfers[key] = { status: 'loading' };
+    computeTransfer(from, to).then((value) => {
+      state.transfers[key] = value;
+    }).catch(() => {
+      state.transfers[key] = { status: 'error' };
+    }).finally(() => {
+      renderList();
+      renderMap();
+    });
+  }
+}
+
+function transferSegments(leg, result) {
+  if (!result.segments || !result.terminals) return result.segments;
+  const segments = result.segments.map((segment) => ({ ...segment }));
+  const depart = state.transfers[transferKey(leg, 'depart')];
+  const arrive = state.transfers[transferKey(leg, 'arrive')];
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  if (first.kind === 'ground' && depart && depart.car) first.coords = depart.car.coords;
+  if (last.kind === 'ground' && arrive && arrive.car) last.coords = arrive.car.coords;
+  return segments;
+}
+
+function uberLink(from, to) {
+  const value = (number) => number.toFixed(6);
+  const name = (text) => encodeURIComponent(String(text || '').slice(0, 60));
+  return `https://m.uber.com/ul/?action=setPickup&pickup[latitude]=${value(from.lat)}&pickup[longitude]=${value(from.lon)}&pickup[nickname]=${name(from.name)}&dropoff[latitude]=${value(to.lat)}&dropoff[longitude]=${value(to.lon)}&dropoff[nickname]=${name(to.name)}`;
+}
+
+function transferBlock(leg, end) {
+  const terminal = leg.result.terminals[end === 'depart' ? 0 : 1];
+  const origin = originOf(end === 'depart' ? leg.a : leg.b);
+  const [from, to] = end === 'depart' ? [origin, terminal] : [terminal, origin];
+  const data = state.transfers[transferKey(leg, end)];
+  const terminalName = terminal.iata ? `${terminal.iata} · ${terminal.name}` : terminal.name;
+  const title = end === 'depart'
+    ? t('route.transferTo', { place: terminalName })
+    : t(origin.stay ? 'route.transferToStay' : 'route.transferToCity', { place: origin.name });
+  const rows = [];
+  if (!data || data.status === 'loading') {
+    rows.push(el('p', { class: 'leg__loading' }, el('span', { class: 'spinner' }), el('span', { text: t('route.transferLoading') })));
+  } else {
+    if (data.car) {
+      rows.push(el('div', { class: 'transfer__option' }, icon('car'),
+        el('span', { class: 'transfer__label', text: t('route.taxi') }),
+        el('span', { class: 'transfer__value', text: `${formatDuration(data.car.duration)} · ${formatDistance(data.car.distance)}` })));
+    }
+    if (data.walk) {
+      rows.push(el('div', { class: 'transfer__option' }, icon('walk'),
+        el('span', { class: 'transfer__label', text: t('modes.walk') }),
+        el('span', { class: 'transfer__value', text: formatDuration(data.walk.duration) })));
+    }
+    if (!data.car && !data.walk) {
+      const km = distance(from, to);
+      rows.push(el('p', { class: 'leg__note', text: t('route.transferApprox', { distance: formatDistance(km), time: formatDuration((km / 1000 / 30) * 3600) }) }));
+    }
+  }
+  const transit = new URLSearchParams({ api: '1', origin: `${from.lat},${from.lon}`, destination: `${to.lat},${to.lon}`, travelmode: 'transit' });
+  return el('div', { class: 'transfer' },
+    el('p', { class: 'transfer__title' }, icon(end === 'depart' ? TERMINAL_ICON[terminal.kind] || 'place' : origin.stay ? 'hotel' : 'place'), el('span', { text: title })),
+    el('p', { class: 'transfer__route', text: `${from.name} → ${to.name}` }),
+    rows,
+    el('div', { class: 'leg__links-row' },
+      el('a', { class: 'btn btn--secondary btn--small', href: uberLink(from, to), target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: 'Uber' }), icon('external')),
+      el('a', { class: 'btn btn--secondary btn--small', href: `https://www.google.com/maps/dir/?${transit}`, target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t('route.publicTransport') }), icon('external'))));
+}
+
 async function computeLeg(leg, signal) {
   const { a, b, mode, pair, time } = leg;
   const km = distance(a, b) / 1000;
@@ -377,26 +533,25 @@ async function computeLeg(leg, signal) {
     const route = await routeStreet(mode, a, b, signal);
     return { status: 'ok', distance: route.distance, duration: route.duration, coords: route.coords };
   }
-  if (mode === 'flight') return computeFlight(a, b, signal);
+  if (mode === 'flight') return computeFlight(a, b);
   let itineraries = [];
   try {
     itineraries = await routeTransit(mode, a, b, signal, time);
   } catch (error) {
     if (error.code === 'aborted') throw error;
   }
-  if (itineraries.length) return transitResult(itineraries, a, b);
+  if (itineraries.length) return transitResult(itineraries, a, b, mode);
   if (mode === 'ferry') return ferryEstimate(a, b);
-  try {
-    const road = await routeStreet('car', a, b, signal);
-    if (mode === 'bus') return busEstimate(road);
-    const duration = Math.max(road.duration * 0.8, (road.distance / 1000 / 85) * 3600);
+  const road = await safely(() => routeStreet('car', a, b, signal));
+  if (!road && !state.modes[pair]) {
+    state.auto[pair] = km < 500 ? 'ferry' : 'flight';
+    return { status: 'switch' };
+  }
+  const viaStations = await stationEstimate(a, b, mode, signal, road);
+  if (viaStations) return viaStations;
+  if (road) {
+    const duration = mode === 'bus' ? road.duration * 1.35 : Math.max(road.duration * 0.8, (road.distance / 1000 / 85) * 3600);
     return { status: 'estimate', distance: road.distance, duration, coords: road.coords, note: 'route.estimateNote' };
-  } catch (error) {
-    if (error.code === 'aborted') throw error;
-    if (error.code === 'noroute' && !state.modes[pair]) {
-      state.auto[pair] = km < 500 ? 'ferry' : 'flight';
-      return { status: 'switch' };
-    }
   }
   const factor = mode === 'bus' ? 55 : 80;
   return { status: 'estimate', distance: km * 1250, duration: (km * 1.25 / factor) * 3600, coords: straight(a, b), note: 'route.estimateNote' };
@@ -555,7 +710,7 @@ function renderMap() {
     if (!result || result.status === 'loading' || result.status === 'error') {
       return { mode: leg.mode, coords: leg.mode === 'flight' ? mapView.arcCoords(leg.a, leg.b) : straight(leg.a, leg.b), estimate: true };
     }
-    return { mode: leg.mode, coords: result.coords, segments: result.segments, airports: result.airports, estimate: result.status === 'estimate' };
+    return { mode: leg.mode, coords: result.coords, segments: transferSegments(leg, result), terminals: result.terminals, estimate: result.status === 'estimate' };
   });
   mapView.renderRoute(mapPoints, mapLegs);
 }
@@ -876,6 +1031,10 @@ function legDetails(leg) {
   if (result && result.itineraries && result.itineraries.length) {
     children.push(el('p', { class: 'leg__subtitle', text: t('route.connections') }));
     children.push(el('ul', { class: 'itineraries' }, result.itineraries.slice(0, 3).map(itineraryItem)));
+  }
+  if (result && result.terminals && result.status !== 'loading') {
+    ensureTransfers(leg);
+    children.push(el('div', { class: 'transfers' }, transferBlock(leg, 'depart'), transferBlock(leg, 'arrive')));
   }
   children.push(bookingLinks(leg));
   return el('div', { class: 'leg__details' }, children);

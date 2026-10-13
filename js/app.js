@@ -219,6 +219,8 @@ function renderSources() {
     el('dd', {}, link('https://overpass-api.de', 'Overpass API')),
     el('dt', { text: t('about.routing') }),
     el('dd', {}, link('https://project-osrm.org', 'OSRM'), ', ', link('https://routing.openstreetmap.de', 'FOSSGIS'), ', ', link('https://transitous.org', 'Transitous')),
+    el('dt', { text: t('about.airports') }),
+    el('dd', {}, link('https://ourairports.com/data/', 'OurAirports'), ' (Public Domain)'),
     el('dt', { text: t('about.contact') }),
     el('dd', {}, link('https://github.com/colinehrhardt-glitch/Reise-App', 'GitHub')),
     el('dt', { text: t('about.photos') }),

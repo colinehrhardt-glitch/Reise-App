@@ -251,7 +251,7 @@ async function overpassAttempt(index, query, timeout, signal) {
   return Array.isArray(data.elements) ? data.elements : [];
 }
 
-async function queryOverpass(query, signal, onWait) {
+async function queryOverpass(query, signal, onWait, { patient = true } = {}) {
   let lastError = null;
   let allBusy = true;
   const order = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
@@ -264,7 +264,7 @@ async function queryOverpass(query, signal, onWait) {
       if (lastError.code !== 'busy') allBusy = false;
     }
   }
-  if (allBusy) {
+  if (allBusy && patient) {
     const seconds = await slotWait(preferredEndpoint, signal);
     if (onWait) onWait(seconds);
     await abortableSleep(seconds * 1000, signal);
@@ -732,43 +732,64 @@ export async function reverseGeocode(lat, lon, lang) {
   return name;
 }
 
-const AIRPORT_RADIUS = 120000;
-const airportCache = new Map(Object.entries(load('airports', {}) || {}));
+const AIRPORT_RADIUS = 150;
+const STATION_RADIUS = 15000;
+const AIRPORT_WEIGHT = { 3: 0.5, 2: 0.85, 1: 1.4 };
+let airportList = null;
+const stationCache = new Map(Object.entries(load('stations', {}) || {}));
 
-function airportKey(lat, lon) {
-  return `${lat.toFixed(2)},${lon.toFixed(2)}`;
+async function airports() {
+  if (airportList) return airportList;
+  const response = await fetch('data/airports.json');
+  if (!response.ok) throw new ApiError('server', response.status);
+  const rows = await response.json();
+  airportList = rows.map(([iata, name, lat, lon, size, city]) => ({ iata, name, lat, lon, size, city }));
+  return airportList;
 }
 
-function airportScore(airport, origin) {
-  const km = roughKm(origin, airport);
-  const bonus = airport.international ? 0.6 : airport.public ? 0.85 : 1;
-  return km * bonus;
+export async function nearestAirport(point) {
+  const list = await airports();
+  let best = null;
+  for (const airport of list) {
+    if (Math.abs(airport.lat - point.lat) > 2 || Math.abs(airport.lon - point.lon) > 3) continue;
+    const km = roughKm(point, airport);
+    if (km > AIRPORT_RADIUS) continue;
+    const score = km * (AIRPORT_WEIGHT[airport.size] || 1);
+    if (!best || score < best.score) best = { airport, score };
+  }
+  if (!best) return null;
+  const { iata, name, lat, lon, city } = best.airport;
+  return { kind: 'airport', iata, name, lat, lon, city, label: iata };
 }
 
-export async function nearestAirport(point, signal = null) {
-  const key = airportKey(point.lat, point.lon);
-  if (airportCache.has(key)) return airportCache.get(key);
-  const query = `[out:json][timeout:20];nwr["aeroway"="aerodrome"]["iata"](around:${AIRPORT_RADIUS},${point.lat.toFixed(5)},${point.lon.toFixed(5)});out tags center 30;`;
-  const elements = await queryOverpass(query, signal);
-  const airports = elements.map((element) => {
+const STATION_FILTERS = {
+  bus: 'nwr["amenity"="bus_station"]',
+  train: 'nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|miniature|tram)$"]["usage"!="tourism"]'
+};
+
+function shortLabel(name) {
+  return name.length > 22 ? `${name.slice(0, 21)}…` : name;
+}
+
+export async function nearestStation(point, type, signal = null) {
+  const key = `${type}|${point.lat.toFixed(2)},${point.lon.toFixed(2)}`;
+  if (stationCache.has(key)) return stationCache.get(key);
+  const query = `[out:json][timeout:15];${STATION_FILTERS[type]}(around:${STATION_RADIUS},${point.lat.toFixed(5)},${point.lon.toFixed(5)});out tags center 25;`;
+  const elements = await queryOverpass(query, signal, null, { patient: false });
+  let best = null;
+  for (const element of elements) {
     const position = coordinates(element);
     const tags = element.tags || {};
-    if (!position || !/^[A-Z]{3}$/.test(tags.iata || '')) return null;
-    if (tags.military === 'airfield' || tags['aerodrome:type'] === 'military' || tags['aerodrome:type'] === 'private') return null;
-    return {
-      iata: tags.iata,
-      name: cleanText(tags[`name:${navigator.language.slice(0, 2)}`] || tags.name).slice(0, 80) || tags.iata,
-      lat: position.lat,
-      lon: position.lon,
-      international: tags['aerodrome:type'] === 'international' || tags.aerodrome === 'international',
-      public: tags['aerodrome:type'] === 'public' || tags.aerodrome === 'public'
-    };
-  }).filter(Boolean);
-  airports.sort((a, b) => airportScore(a, point) - airportScore(b, point));
-  const best = airports[0] || null;
-  airportCache.set(key, best);
-  const entries = [...airportCache.entries()].slice(-80);
-  save('airports', Object.fromEntries(entries));
-  return best;
+    const name = cleanText(tags.name);
+    if (!position || !name) continue;
+    let score = roughKm(point, position);
+    if (type === 'train' && (tags.train === 'yes' || tags.public_transport === 'station')) score *= 0.7;
+    if (type === 'bus' && /terminal|central|rodoviária|terminal de transporte/i.test(name)) score *= 0.7;
+    if (!best || score < best.score) best = { score, station: { kind: type === 'bus' ? 'bus_station' : 'train_station', name: name.slice(0, 80), label: shortLabel(name), lat: position.lat, lon: position.lon } };
+  }
+  const station = best ? best.station : null;
+  stationCache.set(key, station);
+  save('stations', Object.fromEntries([...stationCache.entries()].slice(-120)));
+  return station;
 }
 
