@@ -3,6 +3,7 @@ import { load, save } from './storage.js';
 import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
+import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute } from './planner.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
@@ -10,6 +11,7 @@ const FAVORITE_SORTS = ['added', 'name', 'type', 'distance'];
 const RESULT_SORTS = ['recommended', 'stars', 'distance'];
 const THEMES = ['auto', 'light', 'dark'];
 const SHEET_ORDER = ['peek', 'half', 'full'];
+const TABS = ['stays', 'route'];
 const PHOTO_KINDS = ['commons', 'wikidata', 'url'];
 const HOSTELWORLD_TYPES = ['hostel', 'guest_house'];
 const wideQuery = window.matchMedia('(min-width: 768px)');
@@ -28,6 +30,10 @@ const state = {
   user: null,
   popupItem: null,
   lastSearch: null,
+  tab: pick(load('tab', 'stays'), TABS, 'stays'),
+  staysTitle: '',
+  staysCount: '',
+  routeCount: '',
   areaName: null,
   areaController: null,
   loadFailed: null,
@@ -211,6 +217,10 @@ function renderSources() {
     el('dd', {}, link('https://nominatim.org', 'Nominatim')),
     el('dt', { text: t('about.places') }),
     el('dd', {}, link('https://overpass-api.de', 'Overpass API')),
+    el('dt', { text: t('about.routing') }),
+    el('dd', {}, link('https://project-osrm.org', 'OSRM'), ', ', link('https://routing.openstreetmap.de', 'FOSSGIS'), ', ', link('https://transitous.org', 'Transitous')),
+    el('dt', { text: t('about.contact') }),
+    el('dd', {}, link('https://github.com/colinehrhardt-glitch/Reise-App', 'GitHub')),
     el('dt', { text: t('about.photos') }),
     el('dd', {}, link('https://commons.wikimedia.org', 'Wikimedia Commons'), ', ', link('https://www.wikidata.org', 'Wikidata'))
   );
@@ -438,7 +448,7 @@ function renderMarkers() {
 
 function renderResults() {
   const visible = filteredPlaces();
-  dom.resultsCount.textContent = state.searched ? tCount('results.count', visible.length) : '';
+  setStaysCount(state.searched ? tCount('results.count', visible.length) : '');
   let empty = '';
   dom.resultsRetry.hidden = !state.loadFailed;
   if (state.loadFailed) empty = t('results.failed');
@@ -447,7 +457,7 @@ function renderResults() {
   else if (!visible.length) empty = t('results.noneFiltered');
   dom.resultsEmpty.textContent = empty;
   dom.listToolbar.hidden = visible.length < 2;
-  dom.sheetTitle.textContent = state.areaName ? t('results.titleIn', { place: state.areaName }) : t('results.title');
+  setStaysTitle(state.areaName ? t('results.titleIn', { place: state.areaName }) : t('results.title'));
   dom.resultsList.replaceChildren(...visible.map((place, index) => placeItem(place, state.origin, 'results', isTopPick(place, index))));
   renderChips();
   renderMarkers();
@@ -539,6 +549,54 @@ function displayHost(url) {
   } catch {
     return url;
   }
+}
+
+function setStaysTitle(value) {
+  state.staysTitle = value;
+  applyHeader();
+}
+
+function setStaysCount(value) {
+  state.staysCount = value;
+  applyHeader();
+}
+
+function applyHeader() {
+  const route = state.tab === 'route';
+  dom.sheetTitle.textContent = route ? t('route.title') : state.staysTitle;
+  dom.resultsCount.textContent = route ? state.routeCount : state.staysCount;
+}
+
+function setTab(tab, { fit = true } = {}) {
+  const changed = state.tab !== tab;
+  state.tab = tab;
+  save('tab', tab);
+  const route = tab === 'route';
+  dom.tabStays.setAttribute('aria-selected', String(!route));
+  dom.tabRoute.setAttribute('aria-selected', String(route));
+  dom.chips.hidden = route;
+  dom.sheetBody.hidden = route;
+  dom.routeBody.hidden = !route;
+  dom.sheetHeader.setAttribute('aria-controls', route ? 'route-body' : 'sheet-body');
+  document.body.dataset.tab = tab;
+  dom.sheet.dataset.tab = tab;
+  applyHeader();
+  if (!wideQuery.matches && state.sheet === 'peek' && route) setSheet('half');
+  else setSheet(state.sheet, false);
+  if (route && changed && fit) fitRoute();
+}
+
+function addToRouteButton(item) {
+  return el('button', {
+    type: 'button',
+    class: 'btn btn--secondary popup__add',
+    onclick: () => {
+      const name = item.name || (item.kind === 'poi' ? t(`poi.${item.type}`) : placeName(item));
+      if (addStop({ name, detail: item.address || item.city || null, lat: item.lat, lon: item.lon })) {
+        toast(t('route.added', { name }), { action: { label: t('route.show'), onClick: () => setTab('route') } });
+      }
+    }
+  }, icon('plus'), el('span', { text: t('route.addToRoute') }));
 }
 
 function routeButton(item) {
@@ -649,6 +707,7 @@ function popupContent(place) {
       description ? el('p', { class: 'popup__desc', text: description }) : null,
       contactRows(place),
       priceSection(place),
+      addToRouteButton(place),
       routeButton(place)));
   if (figure) loadPhoto(place, figure);
   return content;
@@ -666,6 +725,7 @@ function poiContent(item) {
       item.operator && item.operator !== item.name ? el('p', { class: 'popup__subtitle', text: item.operator }) : null,
       factChips(poiFacts(item.facts)),
       contactRows(item),
+      addToRouteButton(item),
       routeButton(item)));
 }
 
@@ -718,8 +778,8 @@ function skeletonItem() {
 }
 
 function renderLoading(areaName) {
-  dom.sheetTitle.textContent = areaName ? t('results.titleIn', { place: areaName }) : t('results.title');
-  dom.resultsCount.textContent = t('area.loading');
+  setStaysTitle(areaName ? t('results.titleIn', { place: areaName }) : t('results.title'));
+  setStaysCount(t('area.loading'));
   dom.resultsEmpty.textContent = '';
   dom.listToolbar.hidden = true;
   dom.resultsList.replaceChildren(...Array.from({ length: 5 }, skeletonItem));
@@ -790,7 +850,7 @@ async function searchArea({ areaName = null, area = null } = {}) {
     const data = await fetchCategories(['accommodation'], bounds, {
       signal,
       onWait: (seconds) => {
-        if (current()) dom.resultsCount.textContent = t('area.waiting', { s: seconds });
+        if (current()) setStaysCount(t('area.waiting', { s: seconds }));
       }
     });
     if (!current()) return;
@@ -800,7 +860,7 @@ async function searchArea({ areaName = null, area = null } = {}) {
   } catch (error) {
     if (!current() || error.code === 'aborted') return;
     if (error.code !== 'offline') {
-      dom.resultsCount.textContent = t('area.fallback');
+      setStaysCount(t('area.fallback'));
       try {
         const items = await fetchAccommodationsFallback(bounds, getLanguage(), signal);
         if (!current()) return;
@@ -904,6 +964,23 @@ function updateClearButton() {
   dom.searchClear.hidden = dom.searchInput.value.length === 0;
 }
 
+function requestLocation() {
+  return new Promise((resolve, reject) => {
+    if (!('geolocation' in navigator)) {
+      reject(new Error('unsupported'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition((position) => {
+      const { latitude, longitude, accuracy } = position.coords;
+      state.user = { lat: latitude, lon: longitude };
+      mapView.showUser(latitude, longitude, accuracy);
+      dom.locateBtn.classList.add('is-active');
+      refreshStart();
+      resolve(state.user);
+    }, reject, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+  });
+}
+
 function locate(initial = false) {
   if (!('geolocation' in navigator)) {
     if (!initial) toast(t('locate.unsupported'), { type: 'error' });
@@ -912,26 +989,22 @@ function locate(initial = false) {
   if (state.locating) return;
   state.locating = true;
   dom.locateBtn.classList.add('is-busy');
-  navigator.geolocation.getCurrentPosition((position) => {
+  requestLocation().then((user) => {
     state.locating = false;
     dom.locateBtn.classList.remove('is-busy');
-    dom.locateBtn.classList.add('is-active');
-    const { latitude, longitude, accuracy } = position.coords;
-    state.user = { lat: latitude, lon: longitude };
-    mapView.showUser(latitude, longitude, accuracy);
-    mapView.flyToLocation(latitude, longitude, Math.max(LOCATE_ZOOM, initial ? 0 : mapView.getZoom()), !initial);
-  }, (error) => {
+    mapView.flyToLocation(user.lat, user.lon, Math.max(LOCATE_ZOOM, initial ? 0 : mapView.getZoom()), !initial);
+  }).catch((error) => {
     state.locating = false;
     dom.locateBtn.classList.remove('is-busy');
     if (initial) return;
-    toast(t(error.code === 1 ? 'locate.denied' : 'locate.unavailable'), { type: 'error', duration: 6000 });
-  }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+    toast(t(error && error.code === 1 ? 'locate.denied' : 'locate.unavailable'), { type: 'error', duration: 6000 });
+  });
 }
 
 function sheetPositions() {
   const height = dom.sheet.offsetHeight;
   const safe = parseFloat(getComputedStyle(dom.sheet).paddingBottom) || 0;
-  const peekVisible = dom.sheetHeader.offsetHeight + dom.chips.offsetHeight + safe;
+  const peekVisible = dom.sheetHeader.offsetHeight + dom.sheetTabs.offsetHeight + dom.chips.offsetHeight + safe;
   const halfVisible = Math.max(peekVisible + 80, Math.round(window.innerHeight * 0.48));
   return {
     full: 0,
@@ -955,6 +1028,7 @@ function setSheet(name, animate = true) {
   state.sheet = name;
   applySheetOffset(sheetPositions()[name], animate);
   dom.sheet.dataset.state = name;
+  document.body.dataset.sheet = name;
   dom.sheetHeader.setAttribute('aria-expanded', String(name !== 'peek'));
 }
 
@@ -1083,6 +1157,8 @@ function bindEvents() {
     dom.searchInput.focus();
   });
   dom.areaBtn.addEventListener('click', () => searchArea());
+  dom.tabStays.addEventListener('click', () => setTab('stays'));
+  dom.tabRoute.addEventListener('click', () => setTab('route'));
   dom.resultsRetry.addEventListener('click', () => {
     if (state.loadFailed) state.loadFailed();
   });
@@ -1131,6 +1207,7 @@ function bindEvents() {
   window.addEventListener('offline', () => toast(t('errors.offline'), { type: 'error', duration: 6000 }));
   onLanguageChange(() => {
     renderAll();
+    renderPlanner();
     if (state.popupItem && mapView.getOpenPopupId() === state.popupItem.id) {
       mapView.updatePopup(contentFor(state.popupItem));
     }
@@ -1145,7 +1222,7 @@ function collectDom() {
     searchClear: 'search-clear', searchPanel: 'search-panel', searchMessage: 'search-message', searchResults: 'search-results',
     areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
     layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
-    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
+    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', sheetTabs: 'sheet-tabs', tabStays: 'tab-stays', tabRoute: 'tab-route', routeBody: 'route-body', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
     resultsSort: 'results-sort', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
@@ -1177,9 +1254,21 @@ function init() {
     }
   });
   mapView.setAccommodationsVisible(state.layers.accommodation);
+  initPlanner(dom.routeBody, {
+    getUser: () => state.user,
+    requestLocation,
+    onSummary: (summary) => {
+      state.routeCount = summary;
+      applyHeader();
+    },
+    onShow: () => {
+      if (state.tab !== 'route') setTab('route', { fit: false });
+    }
+  });
   renderAll();
   initSheet();
   setSheet(wideQuery.matches ? 'full' : 'peek', false);
+  setTab(state.tab, { fit: false });
   bindEvents();
   updateClearButton();
   locate(true);

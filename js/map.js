@@ -15,6 +15,7 @@ export const ICONS = {
   train: '<rect x="6" y="3.5" width="12" height="14" rx="3"/><path d="M6 11h12M9 21l1.5-3.5M15 21l-1.5-3.5"/><circle cx="9.2" cy="14.3" r=".7"/><circle cx="14.8" cy="14.3" r=".7"/>',
   ferry: '<path d="M3 17.5c1.5 1.2 3 1.2 4.5 0s3-1.2 4.5 0 3 1.2 4.5 0 3-1.2 4.5 0"/><path d="M5 14.5 6 10h12l1 4.5"/><path d="M9 10V6.5h6V10M12 3.5v3"/>',
   flight: '<path d="M10.5 13.5 4 11l1.2-1.6 7 1.1 4-4.3c.8-.9 2.2-1 3-.2.8.8.7 2.2-.2 3l-4.3 4 1.1 7L14.4 21l-2.5-6.5L8.5 18l.3 2.2-1.2 1-1.4-3.4L2.8 16.4l1-1.2 2.2.3z"/>',
+  chevron: '<path d="m9 6 6 6-6 6"/>',
   grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   swap: '<path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/>',
@@ -51,6 +52,15 @@ export const LAYERS = {
 
 export const FAVORITE_COLOR = '#e64980';
 
+export const ROUTE_MODES = {
+  car: { color: '#1c7ed6' },
+  walk: { color: '#2f9e44', dash: '1 9' },
+  bus: { color: '#e8590c' },
+  train: { color: '#7048e8' },
+  ferry: { color: '#0c8599', dash: '10 8' },
+  flight: { color: '#495057', dash: '2 10' }
+};
+
 const VECTOR_STYLES = {
   light: 'https://tiles.openfreemap.org/styles/liberty',
   dark: 'https://tiles.openfreemap.org/styles/dark'
@@ -77,6 +87,8 @@ let currentAttribution = '';
 let insets = { top: 0, right: 0, bottom: 0, left: 0 };
 let handlers = {};
 let accommodationsVisible = true;
+let routeLayer = null;
+let routeHandlers = {};
 const resultMarkers = new Map();
 const favoriteMarkers = new Map();
 const poiGroups = new Map();
@@ -157,6 +169,7 @@ export function initMap(container, options = {}) {
 
   cluster = createCluster(null).addTo(map);
   favoritesLayer = L.layerGroup().addTo(map);
+  routeLayer = L.featureGroup().addTo(map);
 
   map.on('moveend zoomend', () => handlers.onViewChange?.());
   map.on('click', () => handlers.onMapClick?.());
@@ -536,3 +549,92 @@ export function showUser(lat, lon, accuracy) {
 export function invalidateSize() {
   if (map) map.invalidateSize({ pan: false });
 }
+
+export function setRouteHandlers(next) {
+  routeHandlers = next;
+}
+
+export function arcCoords(from, to, steps = 64) {
+  const rad = Math.PI / 180;
+  const toVector = (point) => [
+    Math.cos(point.lat * rad) * Math.cos(point.lon * rad),
+    Math.cos(point.lat * rad) * Math.sin(point.lon * rad),
+    Math.sin(point.lat * rad)
+  ];
+  const a = toVector(from);
+  const b = toVector(to);
+  const dot = Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+  const omega = Math.acos(dot);
+  if (omega < 1e-6) return [[from.lat, from.lon], [to.lat, to.lon]];
+  const coords = [];
+  let previous = null;
+  for (let i = 0; i <= steps; i += 1) {
+    const f = i / steps;
+    const k1 = Math.sin((1 - f) * omega) / Math.sin(omega);
+    const k2 = Math.sin(f * omega) / Math.sin(omega);
+    const x = k1 * a[0] + k2 * b[0];
+    const y = k1 * a[1] + k2 * b[1];
+    const z = k1 * a[2] + k2 * b[2];
+    const lat = Math.atan2(z, Math.sqrt(x * x + y * y)) / rad;
+    let lon = Math.atan2(y, x) / rad;
+    if (previous !== null) {
+      while (lon - previous > 180) lon -= 360;
+      while (lon - previous < -180) lon += 360;
+    }
+    previous = lon;
+    coords.push([lat, lon]);
+  }
+  return coords;
+}
+
+function stopIcon(label, start) {
+  return L.divIcon({
+    className: 'marker-icon',
+    html: `<div class="route-stop${start ? ' route-stop--start' : ''}">${label}</div>`,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14]
+  });
+}
+
+export function renderRoute(points, legs) {
+  routeLayer.clearLayers();
+  legs.forEach((leg, index) => {
+    if (!leg || !Array.isArray(leg.coords) || leg.coords.length < 2) return;
+    const style = ROUTE_MODES[leg.mode] || ROUTE_MODES.car;
+    L.polyline(leg.coords, { color: '#ffffff', weight: 9, opacity: 0.85, interactive: false, lineCap: 'round' }).addTo(routeLayer);
+    const line = L.polyline(leg.coords, {
+      color: style.color,
+      weight: 5,
+      opacity: leg.estimate ? 0.8 : 0.95,
+      dashArray: style.dash || (leg.estimate ? '8 8' : null),
+      lineCap: 'round'
+    }).addTo(routeLayer);
+    line.on('click', () => routeHandlers.onLegClick?.(index));
+  });
+  points.forEach((point, index) => {
+    const marker = L.marker([point.lat, point.lon], {
+      icon: stopIcon(point.label, point.start),
+      keyboard: false,
+      zIndexOffset: 1200,
+      title: point.name || ''
+    }).addTo(routeLayer);
+    marker.on('click', () => routeHandlers.onStopClick?.(index));
+  });
+}
+
+export function fitCoords(coords, maxZoom = 14) {
+  const valid = coords.filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+  if (!valid.length) return;
+  if (valid.length === 1) {
+    moveTo(valid[0], Math.max(map.getZoom(), 12));
+    return;
+  }
+  const bounds = L.latLngBounds(valid);
+  map.flyToBounds(bounds, {
+    paddingTopLeft: [insets.left + 36, insets.top + 36],
+    paddingBottomRight: [insets.right + 36, insets.bottom + 36],
+    maxZoom,
+    duration: 0.8
+  });
+}
+

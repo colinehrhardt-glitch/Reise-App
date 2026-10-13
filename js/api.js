@@ -106,8 +106,9 @@ async function request(url, options = {}, timeout = 30000, signal = null) {
   }
 }
 
-export async function searchPlaces(query, lang) {
-  const key = `${lang}|${query.trim().toLowerCase()}`;
+export async function searchPlaces(query, lang, { countries = [] } = {}) {
+  const codes = countries.map((code) => code.toLowerCase()).sort().join(',');
+  const key = `${lang}|${codes}|${query.trim().toLowerCase()}`;
   if (nominatimCache.has(key)) return nominatimCache.get(key);
 
   const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
@@ -120,6 +121,7 @@ export async function searchPlaces(query, lang) {
     limit: '5',
     'accept-language': lang
   });
+  if (codes) params.set('countrycodes', codes);
   const data = await request(`${NOMINATIM_URL}?${params}`, { headers: { Accept: 'application/json' } }, 15000);
   const results = dedupeResults((Array.isArray(data) ? data : []).map(normalizeSearchResult).filter(Boolean));
   nominatimCache.set(key, results);
@@ -571,3 +573,160 @@ function safeUrl(value) {
     return null;
   }
 }
+
+const REVERSE_URL = 'https://nominatim.openstreetmap.org/reverse';
+const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving/';
+const FOSSGIS_URLS = {
+  car: 'https://routing.openstreetmap.de/routed-car/route/v1/driving/',
+  walk: 'https://routing.openstreetmap.de/routed-foot/route/v1/driving/'
+};
+const TRANSITOUS_URL = 'https://api.transitous.org/api/';
+const TRANSITOUS_VERSIONS = ['v5', 'v4', 'v2'];
+const ROUTE_TTL = 15 * 60 * 1000;
+const routeCache = new Map();
+const reverseCache = new Map();
+
+export const TRANSIT_MODES = {
+  bus: ['BUS', 'COACH', 'TRAM', 'SUBWAY'],
+  train: ['HIGHSPEED_RAIL', 'LONG_DISTANCE', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'REGIONAL_RAIL', 'RAIL', 'SUBURBAN', 'SUBWAY', 'TRAM', 'BUS'],
+  ferry: ['FERRY', 'BUS', 'TRAM', 'SUBWAY', 'REGIONAL_RAIL', 'SUBURBAN']
+};
+
+function pointKey(point) {
+  return `${point.lat.toFixed(4)},${point.lon.toFixed(4)}`;
+}
+
+function cached(key) {
+  const entry = routeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.time > ROUTE_TTL) {
+    routeCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function remember(key, value) {
+  routeCache.set(key, { value, time: Date.now() });
+  if (routeCache.size > 200) routeCache.delete(routeCache.keys().next().value);
+  return value;
+}
+
+export async function routeStreet(mode, from, to, signal = null) {
+  const key = `street|${mode}|${pointKey(from)}|${pointKey(to)}`;
+  const hit = cached(key);
+  if (hit) return hit;
+  const coords = `${from.lon.toFixed(6)},${from.lat.toFixed(6)};${to.lon.toFixed(6)},${to.lat.toFixed(6)}`;
+  const overview = roughKm(from, to) > 150 ? 'simplified' : 'full';
+  const urls = mode === 'car' ? [OSRM_URL, FOSSGIS_URLS.car] : [FOSSGIS_URLS.walk];
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const data = await request(`${url}${coords}?overview=${overview}&geometries=geojson&steps=false&alternatives=false`, {}, 20000, signal);
+      if (data.code === 'NoRoute' || data.code === 'NoSegment' || !Array.isArray(data.routes) || !data.routes.length) throw new ApiError('noroute');
+      if (data.code !== 'Ok') throw new ApiError('server');
+      const route = data.routes[0];
+      return remember(key, {
+        distance: route.distance,
+        duration: route.duration,
+        coords: route.geometry.coordinates.map(([lon, lat]) => [lat, lon])
+      });
+    } catch (error) {
+      lastError = error instanceof ApiError ? error : new ApiError('server');
+      if (lastError.code === 'server' && lastError.status === 400) lastError = new ApiError('noroute');
+      if (['aborted', 'offline', 'noroute'].includes(lastError.code)) throw lastError;
+    }
+  }
+  throw lastError || new ApiError('server');
+}
+
+export function decodePolyline(encoded, precision = 6) {
+  if (typeof encoded !== 'string') return [];
+  const factor = 10 ** precision;
+  const coords = [];
+  let index = 0;
+  let lat = 0;
+  let lon = 0;
+  while (index < encoded.length) {
+    for (const axis of [0, 1]) {
+      let result = 0;
+      let shift = 0;
+      let byte;
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20 && index < encoded.length);
+      const delta = result & 1 ? ~(result >> 1) : result >> 1;
+      if (axis === 0) lat += delta;
+      else lon += delta;
+    }
+    coords.push([lat / factor, lon / factor]);
+  }
+  return coords;
+}
+
+function transitLeg(leg) {
+  const geometry = leg.legGeometry || {};
+  return {
+    mode: String(leg.mode || ''),
+    name: cleanText(leg.displayName || leg.routeShortName || leg.tripShortName || '').slice(0, 40),
+    headsign: cleanText(leg.headsign).slice(0, 60),
+    agency: cleanText(leg.agencyName).slice(0, 60),
+    from: cleanText(leg.from && leg.from.name).slice(0, 80),
+    to: cleanText(leg.to && leg.to.name).slice(0, 80),
+    start: leg.startTime,
+    end: leg.endTime,
+    distance: Number(leg.distance) || 0,
+    coords: decodePolyline(geometry.points, Number.isFinite(geometry.precision) ? geometry.precision : 6)
+  };
+}
+
+export async function routeTransit(mode, from, to, signal = null) {
+  const key = `transit|${mode}|${pointKey(from)}|${pointKey(to)}`;
+  const hit = cached(key);
+  if (hit) return hit;
+  const params = new URLSearchParams({
+    fromPlace: `${from.lat.toFixed(6)},${from.lon.toFixed(6)}`,
+    toPlace: `${to.lat.toFixed(6)},${to.lon.toFixed(6)}`,
+    time: new Date().toISOString(),
+    transitModes: TRANSIT_MODES[mode].join(','),
+    numItineraries: '3'
+  });
+  let data = null;
+  for (const version of TRANSITOUS_VERSIONS) {
+    try {
+      data = await request(`${TRANSITOUS_URL}${version}/plan?${params}`, { headers: { Accept: 'application/json' } }, 25000, signal);
+      break;
+    } catch (error) {
+      if (error.code === 'server' && error.status === 404) continue;
+      throw error;
+    }
+  }
+  const itineraries = (data && Array.isArray(data.itineraries) ? data.itineraries : [])
+    .map((itinerary) => ({
+      duration: Number(itinerary.duration) || 0,
+      start: itinerary.startTime,
+      end: itinerary.endTime,
+      transfers: Number(itinerary.transfers) || 0,
+      tz: itinerary.legs && itinerary.legs[0] && itinerary.legs[0].from ? itinerary.legs[0].from.tz : null,
+      legs: (Array.isArray(itinerary.legs) ? itinerary.legs : []).map(transitLeg)
+    }))
+    .filter((itinerary) => itinerary.legs.some((leg) => !['WALK', 'BIKE', 'CAR', 'RENTAL'].includes(leg.mode)));
+  return remember(key, itineraries);
+}
+
+export async function reverseGeocode(lat, lon, lang) {
+  const key = `${lang}|${lat.toFixed(2)},${lon.toFixed(2)}`;
+  if (reverseCache.has(key)) return reverseCache.get(key);
+  const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastNominatimCall = Date.now();
+  const params = new URLSearchParams({ lat: lat.toFixed(5), lon: lon.toFixed(5), format: 'jsonv2', zoom: '10', 'accept-language': lang });
+  const data = await request(`${REVERSE_URL}?${params}`, { headers: { Accept: 'application/json' } }, 10000);
+  const address = (data && data.address) || {};
+  const name = cleanText(address.city || address.town || address.village || address.municipality || address.county || data.name || '') || null;
+  reverseCache.set(key, name);
+  return name;
+}
+

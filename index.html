@@ -71,6 +71,16 @@
         <span class="sheet__count" id="results-count"></span>
       </div>
     </div>
+    <div class="tabs" id="sheet-tabs" role="tablist">
+      <button type="button" class="tab" id="tab-stays" role="tab" aria-selected="true" aria-controls="sheet-body" data-tab="stays">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 19v-9"/><path d="M3 15h18v4"/><path d="M21 15v-2.5A3.5 3.5 0 0 0 17.5 9H11v6"/><circle cx="7" cy="12" r="1.8"/></svg>
+        <span data-i18n="tabs.stays"></span>
+      </button>
+      <button type="button" class="tab" id="tab-route" role="tab" aria-selected="false" aria-controls="route-body" data-tab="route">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/></svg>
+        <span data-i18n="tabs.route"></span>
+      </button>
+    </div>
     <div class="chips" id="chips" role="toolbar" data-i18n-attr="aria-label:filter.label"></div>
     <div class="sheet__body" id="sheet-body">
       <div class="list-toolbar" id="list-toolbar" hidden>
@@ -81,6 +91,7 @@
       <div class="retry-row"><button type="button" class="btn btn--secondary" id="results-retry" hidden data-i18n="common.retry"></button></div>
       <ul class="place-list" id="results-list" data-i18n-attr="aria-label:results.listLabel"></ul>
     </div>
+    <div class="sheet__body" id="route-body" hidden></div>
   </section>
 
   <div class="scrim" id="scrim" hidden></div>
