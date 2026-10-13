@@ -10,8 +10,10 @@ const NOMINATIM_INTERVAL = 1100;
 const CACHE_TTL = 12 * 60 * 60 * 1000;
 const CACHE_SIZE = 40;
 const BBOX_PADDING = 0.1;
-const FIRST_TIMEOUT = 24000;
-const RETRY_TIMEOUT = 35000;
+const FIRST_TIMEOUT = 20000;
+const RETRY_TIMEOUT = 25000;
+const MAX_SLOT_WAIT = 30;
+const FALLBACK_TYPES = [['hotel', 'hotel'], ['hostel', 'hostel'], ['guest house', 'guest_house'], ['motel', 'motel']];
 const PERSIST_KEY = 'areaCache';
 const PERSIST_MAX = 4;
 const PERSIST_ITEMS = 1500;
@@ -62,7 +64,8 @@ async function request(url, options = {}, timeout = 30000, signal = null) {
       throw new ApiError(navigator.onLine === false ? 'offline' : 'network');
     }
     if (response.status === 429) throw new ApiError('busy', 429);
-    if (response.status === 504 || response.status === 408) throw new ApiError('timeout', response.status);
+    if (response.status === 504 || response.status === 503) throw new ApiError('busy', response.status);
+    if (response.status === 408) throw new ApiError('timeout', response.status);
     if (!response.ok) throw new ApiError('server', response.status);
     try {
       return await response.json();
@@ -165,30 +168,125 @@ function buildQuery(categories, bounds) {
   return `[out:json][timeout:22];${parts.join('')}`;
 }
 
-async function queryOverpass(query, signal) {
+function abortableSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new ApiError('aborted'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', stop);
+      resolve();
+    }, ms);
+    const stop = () => {
+      clearTimeout(timer);
+      reject(new ApiError('aborted'));
+    };
+    if (signal) signal.addEventListener('abort', stop, { once: true });
+  });
+}
+
+async function slotWait(index, signal) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  const cancel = () => controller.abort();
+  if (signal) signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const response = await fetch(OVERPASS_URLS[index].replace(/interpreter$/, 'status'), { signal: controller.signal });
+    const text = await response.text();
+    if (/\d+\s+slots?\s+available\s+now/i.test(text)) return 1;
+    const waits = [...text.matchAll(/in\s+(-?\d+)\s+seconds?/gi)].map((match) => Number(match[1]));
+    return waits.length ? Math.min(MAX_SLOT_WAIT, Math.max(1, Math.min(...waits) + 1)) : 10;
+  } catch {
+    if (signal && signal.aborted) throw new ApiError('aborted');
+    return 10;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', cancel);
+  }
+}
+
+async function overpassAttempt(index, query, timeout, signal) {
+  const data = await request(OVERPASS_URLS[index], {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+    body: `data=${encodeURIComponent(query)}`
+  }, timeout, signal);
+  const remark = String(data.remark || '');
+  if (/timed out|timeout/i.test(remark)) throw new ApiError('timeout');
+  if (/out of memory|too many|rate_limited|too busy/i.test(remark)) throw new ApiError('busy');
+  if (index !== preferredEndpoint) {
+    preferredEndpoint = index;
+    save('overpassEndpoint', index);
+  }
+  return Array.isArray(data.elements) ? data.elements : [];
+}
+
+async function queryOverpass(query, signal, onWait) {
   let lastError = null;
+  let allBusy = true;
   const order = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
   for (const [attempt, index] of order.entries()) {
     try {
-      const data = await request(OVERPASS_URLS[index], {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: `data=${encodeURIComponent(query)}`
-      }, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT, signal);
-      const remark = String(data.remark || '');
-      if (/timed out|timeout/i.test(remark)) throw new ApiError('timeout');
-      if (/out of memory|too many|rate_limited/i.test(remark)) throw new ApiError('busy');
-      if (index !== preferredEndpoint) {
-        preferredEndpoint = index;
-        save('overpassEndpoint', index);
-      }
-      return Array.isArray(data.elements) ? data.elements : [];
+      return await overpassAttempt(index, query, attempt === 0 ? FIRST_TIMEOUT : RETRY_TIMEOUT, signal);
     } catch (error) {
       lastError = error instanceof ApiError ? error : new ApiError('server');
-      if (lastError.code === 'offline' || lastError.code === 'aborted') break;
+      if (lastError.code === 'offline' || lastError.code === 'aborted') throw lastError;
+      if (lastError.code !== 'busy') allBusy = false;
     }
   }
+  if (allBusy) {
+    const seconds = await slotWait(preferredEndpoint, signal);
+    if (onWait) onWait(seconds);
+    await abortableSleep(seconds * 1000, signal);
+    return overpassAttempt(preferredEndpoint, query, RETRY_TIMEOUT, signal);
+  }
   throw lastError || new ApiError('server');
+}
+
+function fallbackTags(item, tourism) {
+  const address = item.address || {};
+  const tags = { ...(item.extratags || {}), tourism, name: item.name || '' };
+  if (address.road) tags['addr:street'] = address.road;
+  if (address.house_number) tags['addr:housenumber'] = address.house_number;
+  if (address.postcode) tags['addr:postcode'] = address.postcode;
+  const city = address.city || address.town || address.village;
+  if (city) tags['addr:city'] = city;
+  return tags;
+}
+
+export async function fetchAccommodationsFallback(bounds, lang, signal = null) {
+  const places = new Map();
+  for (const [phrase, tourism] of FALLBACK_TYPES) {
+    if (signal && signal.aborted) throw new ApiError('aborted');
+    const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
+    if (wait > 0) await abortableSleep(wait, signal);
+    lastNominatimCall = Date.now();
+    const params = new URLSearchParams({
+      q: phrase,
+      format: 'jsonv2',
+      limit: '40',
+      bounded: '1',
+      viewbox: [bounds.west, bounds.north, bounds.east, bounds.south].map((value) => value.toFixed(5)).join(','),
+      extratags: '1',
+      addressdetails: '1',
+      'accept-language': lang
+    });
+    let data = [];
+    try {
+      data = await request(`${NOMINATIM_URL}?${params}`, { headers: { Accept: 'application/json' } }, 12000, signal);
+    } catch (error) {
+      if (error.code === 'aborted' || error.code === 'offline') throw error;
+      continue;
+    }
+    for (const item of Array.isArray(data) ? data : []) {
+      if (item.category !== 'tourism' || item.type !== tourism) continue;
+      const element = { type: item.osm_type, id: item.osm_id, lat: Number(item.lat), lon: Number(item.lon), tags: fallbackTags(item, tourism) };
+      const place = normalizeAccommodation(element);
+      if (place && isInside(place, bounds)) places.set(place.id, place);
+    }
+  }
+  return [...places.values()];
 }
 
 function validBounds(value) {
@@ -217,7 +315,7 @@ function findCached(category, bounds) {
     && (!entry.truncated || contains(bounds, entry.query)));
 }
 
-export async function fetchCategories(categories, bounds, { signal = null } = {}) {
+export async function fetchCategories(categories, bounds, { signal = null, onWait = null } = {}) {
   const now = Date.now();
   for (let i = overpassCache.length - 1; i >= 0; i -= 1) {
     if (now - overpassCache[i].time > CACHE_TTL) overpassCache.splice(i, 1);
@@ -233,7 +331,7 @@ export async function fetchCategories(categories, bounds, { signal = null } = {}
   if (!missing.length) return result;
 
   const padded = padBounds(bounds);
-  const elements = await queryOverpass(buildQuery(missing, padded), signal);
+  const elements = await queryOverpass(buildQuery(missing, padded), signal, onWait);
   const grouped = Object.fromEntries(missing.map((category) => [category, new Map()]));
   for (const element of elements) {
     const tags = element.tags || {};

@@ -1,6 +1,6 @@
 import { t, tCount, getLanguage, setLanguage, onLanguageChange, applyTranslations, LANGUAGES, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
-import { searchPlaces, fetchCategories, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
+import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
 
 const MIN_SEARCH_ZOOM = 13;
@@ -801,10 +801,38 @@ function renderLoading(areaName) {
 }
 
 async function loadPoiLayers(bounds, signal) {
-  for (const category of POI_CATEGORIES.filter((key) => state.layers[key])) {
+  const categories = POI_CATEGORIES.filter((key) => state.layers[key]);
+  if (!categories.length || signal.aborted) return;
+  beginRequest();
+  try {
+    const data = await fetchCategories(categories, bounds, { signal });
     if (signal.aborted) return;
-    await loadPoiLayer(category, bounds, signal);
+    for (const category of categories) {
+      state.poi[category] = data[category].items;
+      renderPoi(category);
+    }
+    if (categories.some((category) => data[category].truncated)) truncatedNotice();
+  } catch (error) {
+    if (error.code === 'aborted' || signal.aborted) return;
+    toast(errorMessage(error), {
+      type: 'error',
+      duration: 8000,
+      action: { label: t('common.retry'), onClick: () => loadPoiLayers(bounds, signal) }
+    });
+  } finally {
+    endRequest();
   }
+}
+
+function showAccommodations(items, { bounds, center, areaName }, partial = false) {
+  state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
+  state.places = sortPlaces(items);
+  state.searched = true;
+  state.lastSearch = partial ? null : bounds;
+  if (areaName) state.filter = 'all';
+  renderResults();
+  dom.sheetBody.scrollTop = 0;
+  if (areaName && !wideQuery.matches && state.places.length && state.sheet === 'peek') setSheet('half');
 }
 
 async function searchArea({ areaName = null, area = null } = {}) {
@@ -814,11 +842,14 @@ async function searchArea({ areaName = null, area = null } = {}) {
   }
   if (state.areaController) state.areaController.abort();
   const controller = new AbortController();
+  const { signal } = controller;
   state.areaController = controller;
   hideSearchPanel();
   toggleLayers(false);
   const bounds = area ? area.bounds : mapView.getBounds();
   const center = area ? area.center : mapView.getVisibleCenter();
+  const context = { bounds, center, areaName };
+  const current = () => state.areaController === controller;
   state.areaLoading = true;
   state.loadFailed = null;
   state.places = [];
@@ -830,20 +861,32 @@ async function searchArea({ areaName = null, area = null } = {}) {
   beginRequest();
   let loaded = false;
   try {
-    const data = await fetchCategories(['accommodation'], bounds, { signal: controller.signal });
-    if (state.areaController !== controller) return;
-    state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
-    state.places = sortPlaces(data.accommodation.items);
-    state.searched = true;
-    state.lastSearch = bounds;
-    if (areaName) state.filter = 'all';
+    const data = await fetchCategories(['accommodation'], bounds, {
+      signal,
+      onWait: (seconds) => {
+        if (current()) dom.resultsCount.textContent = t('area.waiting', { s: seconds });
+      }
+    });
+    if (!current()) return;
     loaded = true;
-    renderResults();
-    dom.sheetBody.scrollTop = 0;
-    if (areaName && !wideQuery.matches && state.places.length && state.sheet === 'peek') setSheet('half');
+    showAccommodations(data.accommodation.items, context);
     if (data.accommodation.truncated) truncatedNotice();
   } catch (error) {
-    if (state.areaController !== controller || error.code === 'aborted') return;
+    if (!current() || error.code === 'aborted') return;
+    if (error.code !== 'offline') {
+      dom.resultsCount.textContent = t('area.fallback');
+      try {
+        const items = await fetchAccommodationsFallback(bounds, getLanguage(), signal);
+        if (!current()) return;
+        if (items.length) {
+          showAccommodations(items, context, true);
+          toast(t('results.partial'), { duration: 7000 });
+          return;
+        }
+      } catch (fallbackError) {
+        if (!current() || fallbackError.code === 'aborted') return;
+      }
+    }
     const retry = () => searchArea({ areaName, area: { bounds, center } });
     state.loadFailed = retry;
     renderResults();
@@ -854,12 +897,12 @@ async function searchArea({ areaName = null, area = null } = {}) {
     });
   } finally {
     endRequest();
-    if (state.areaController === controller) {
+    if (current()) {
       state.areaLoading = false;
       updateAreaButton();
     }
   }
-  if (loaded) loadPoiLayers(bounds, controller.signal);
+  if (loaded) loadPoiLayers(bounds, signal);
 }
 
 function showSearchMessage(message, isError = false) {
