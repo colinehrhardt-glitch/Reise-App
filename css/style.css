@@ -421,6 +421,12 @@ svg {
   text-overflow: ellipsis;
 }
 
+.area-btn.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-10px) scale(0.96);
+}
+
 .area-btn:active {
   transform: translateX(-50%) scale(0.96);
 }
@@ -683,6 +689,10 @@ svg {
 
 .sheet__title {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-display);
   font-size: 20px;
   font-weight: 700;
@@ -845,6 +855,28 @@ svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.place__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.place__title .place__name {
+  min-width: 0;
+}
+
+.top-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .place__name.is-unnamed {

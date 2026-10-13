@@ -299,7 +299,7 @@ export function zoomInTo(minZoom) {
 
 export function showSearchResult(result) {
   if (result.rank >= 16 || !result.bounds) {
-    const zoom = result.rank >= 26 ? 17 : result.rank >= 20 ? 15 : 14;
+    const zoom = result.rank >= 26 ? 17 : result.rank >= 20 ? 15 : result.rank >= 17 ? 14 : 13;
     return moveTo([result.lat, result.lon], zoom);
   }
   return new Promise((resolve) => {

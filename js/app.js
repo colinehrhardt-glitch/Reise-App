@@ -26,6 +26,8 @@ const state = {
   locating: false,
   user: null,
   popupItem: null,
+  lastSearch: null,
+  areaName: null,
   sheet: 'peek',
   searchToken: 0,
   favorites: sanitizeFavorites(load('favorites', {})),
@@ -478,7 +480,7 @@ function setHeartState(button, active) {
   button.setAttribute('aria-label', t(active ? 'place.favoriteRemove' : 'place.favoriteAdd'));
 }
 
-function placeItem(place, reference, context) {
+function placeItem(place, reference, context, top = false) {
   const meta = [el('span', { text: typeLabel(place.type) })];
   if (place.stars) meta.push(el('span', { class: 'stars', 'aria-label': starLabel(place.stars), text: starString(place.stars) }));
   if (reference) meta.push(el('span', { text: formatDistance(distance(reference, place)) }));
@@ -486,9 +488,15 @@ function placeItem(place, reference, context) {
     el('button', { type: 'button', class: 'place__main', onclick: () => selectPlace(place, context) },
       typeDot(place.type),
       el('span', { class: 'place__text' },
-        el('span', { class: `place__name${place.name ? '' : ' is-unnamed'}`, text: placeName(place) }),
+        el('span', { class: 'place__title' },
+          el('span', { class: `place__name${place.name ? '' : ' is-unnamed'}`, text: placeName(place) }),
+          top ? el('span', { class: 'top-badge', text: t('place.top') }) : null),
         el('span', { class: 'place__meta' }, meta))),
     heartButton(place));
+}
+
+function isTopPick(place, index) {
+  return state.resultSort === 'recommended' && state.filter === 'all' && index < 3 && Boolean(place.name) && placeScore(place) > 0;
 }
 
 function renderMarkers() {
@@ -507,7 +515,8 @@ function renderResults() {
   else if (!visible.length) empty = t('results.noneFiltered');
   dom.resultsEmpty.textContent = empty;
   dom.listToolbar.hidden = visible.length < 2;
-  dom.resultsList.replaceChildren(...visible.map((place) => placeItem(place, state.origin, 'results')));
+  dom.sheetTitle.textContent = state.areaName ? t('results.titleIn', { place: state.areaName }) : t('results.title');
+  dom.resultsList.replaceChildren(...visible.map((place, index) => placeItem(place, state.origin, 'results', isTopPick(place, index))));
   renderChips();
   renderMarkers();
 }
@@ -746,15 +755,27 @@ async function selectPlace(place, context) {
   openItemPopup(place);
 }
 
+function covers(outer, inner) {
+  const latPad = (outer.north - outer.south) * 0.25;
+  const lonPad = (outer.east - outer.west) * 0.25;
+  return inner.south >= outer.south - latPad && inner.north <= outer.north + latPad
+    && inner.west >= outer.west - lonPad && inner.east <= outer.east + lonPad;
+}
+
 function updateAreaButton() {
   const zoomedOut = mapView.getZoom() < MIN_SEARCH_ZOOM;
+  const covered = Boolean(state.lastSearch) && !zoomedOut && covers(state.lastSearch, mapView.getBounds());
+  const hidden = covered && !state.areaLoading;
+  dom.areaBtn.classList.toggle('is-hidden', hidden);
+  dom.areaBtn.setAttribute('aria-hidden', String(hidden));
+  dom.areaBtn.tabIndex = hidden ? -1 : 0;
   dom.areaBtn.classList.toggle('is-disabled', zoomedOut && !state.areaLoading);
   dom.areaBtn.classList.toggle('is-loading', state.areaLoading);
   dom.areaBtn.setAttribute('aria-busy', String(state.areaLoading));
   dom.areaLabel.textContent = state.areaLoading ? t('area.loading') : zoomedOut ? t('area.zoomIn') : t('area.search');
 }
 
-async function searchArea() {
+async function searchArea({ areaName = null } = {}) {
   if (state.areaLoading) return;
   if (mapView.getZoom() < MIN_SEARCH_ZOOM) {
     mapView.zoomInTo(MIN_SEARCH_ZOOM);
@@ -773,18 +794,22 @@ async function searchArea() {
     state.origin = state.user && isInside(state.user, bounds) ? state.user : center;
     state.places = sortPlaces(data.accommodation.items);
     state.searched = true;
+    state.lastSearch = bounds;
+    state.areaName = areaName;
+    if (areaName) state.filter = 'all';
     for (const category of categories.slice(1)) {
       state.poi[category] = data[category].items;
       renderPoi(category);
     }
     renderResults();
     dom.sheetBody.scrollTop = 0;
+    if (areaName && !wideQuery.matches && state.places.length && state.sheet === 'peek') setSheet('half');
     if (categories.some((category) => data[category].truncated)) truncatedNotice();
   } catch (error) {
     toast(errorMessage(error), {
       type: 'error',
       duration: 8000,
-      action: { label: t('common.retry'), onClick: searchArea }
+      action: { label: t('common.retry'), onClick: () => searchArea({ areaName }) }
     });
   } finally {
     state.areaLoading = false;
@@ -815,14 +840,17 @@ function renderSearchResults(results) {
   dom.searchPanel.hidden = false;
 }
 
-function chooseSearchResult(result) {
+async function chooseSearchResult(result) {
   hideSearchPanel();
   dom.searchInput.value = result.name;
   updateClearButton();
   dom.searchInput.blur();
   mapView.closePopup();
-  if (!wideQuery.matches && state.sheet !== 'peek') setSheet('peek');
-  mapView.showSearchResult(result);
+  const local = result.rank >= 16 || !result.bounds;
+  if (!wideQuery.matches) setSheet(local ? 'half' : 'peek');
+  await mapView.showSearchResult(result);
+  if (mapView.getZoom() >= MIN_SEARCH_ZOOM) searchArea({ areaName: result.name });
+  else toast(t('search.zoomHint'), { duration: 5000 });
 }
 
 async function handleSearch(event) {
@@ -1029,7 +1057,7 @@ function bindEvents() {
     hideSearchPanel();
     dom.searchInput.focus();
   });
-  dom.areaBtn.addEventListener('click', searchArea);
+  dom.areaBtn.addEventListener('click', () => searchArea());
   dom.locateBtn.addEventListener('click', () => locate(false));
   dom.layersBtn.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -1089,7 +1117,7 @@ function collectDom() {
     searchClear: 'search-clear', searchPanel: 'search-panel', searchMessage: 'search-message', searchResults: 'search-results',
     areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
     layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
-    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', listToolbar: 'list-toolbar',
+    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', listToolbar: 'list-toolbar',
     resultsSort: 'results-sort', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
