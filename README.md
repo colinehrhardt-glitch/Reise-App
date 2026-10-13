@@ -9,7 +9,7 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - Filter, Sortierung (Empfohlen, Sterne, Entfernung), Marker-Clustering, ausziehbare Ergebnisliste
 - Popups mit Foto (Wikimedia Commons/Wikidata), Ausstattung, Kontakt und Preis-Links (Booking.com, Google)
 - Ebenen-Panel mit Legende: Transport (Flughäfen, Bahnhöfe, Busbahnhöfe, Fährterminals), Geld, Einkaufen, Gesundheit, Essen & Trinken zuschaltbar
-- Routen-Planer (Reiter „Route“): Länder wählen, Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
+- Routen-Planer (Reiter „Route“): Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
 - Verkehrsmittel je Etappe (Vorschlag nach Entfernung, änderbar): Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus
@@ -38,7 +38,7 @@ Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap © OpenM
 MIT – siehe `LICENSE`.
 
 ## Offene Punkte für Stufe 5 (eigener Server)
-- **KI-Anbindung des Routen-Planers:** Die KI soll aus Ländern und Wunsch-Städten Orte, Route und Aktivitäten vorschlagen; alles bleibt danach von Hand änderbar. Der Planer hat dafür schon die Funktion `applyPlan({ countries, startPlace, stops })` in `js/planner.js`. Schlüssel nur auf dem Server, nie im Frontend.
+- **KI-Reiseplanung:** Vor der Reise fragt die App, welche Länder und Städte dabei sein sollen. Die KI schlägt daraus Routen, weitere Orte und Aktivitäten vor; alles bleibt danach von Hand änderbar. Die Länder-Auswahl gehört zu diesem Schritt (nicht in den Planer). Der Planer übernimmt das Ergebnis über `applyPlan({ startPlace, stops })` in `js/planner.js`. Schlüssel nur auf dem Server, nie im Frontend.
 - **Ladezeit der Unterkünfte:** Der öffentliche Overpass-Server ist oft ausgelastet (Suchen dauern teils 10–20 s oder werden abgelehnt). Lösung: eigene, wöchentlich aktualisierte Kopie der OSM-Daten statt Live-Abfragen – entweder als fertige Datenpakete über GitHub (kostenlos) oder über den eigenen Server. Ein reiner Weiterleitungs-Server hilft nicht.
 - **Zusatz-Ebenen** (Geld, Einkaufen, Gesundheit, Essen) hängen ebenfalls am Overpass-Server und sollen mit umziehen.
 - **Hostelworld:** Partnerprogramm (partners.hostelworld.com) beantragen; Preise und Bilder nur mit Partner-Zugang und über den Server (Schlüssel nie im Frontend). Bis dahin führt der Button über eine Google-Suche zu Hostelworld.

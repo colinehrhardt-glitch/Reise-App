@@ -1911,50 +1911,6 @@ svg[viewBox="0 0 24 24"] {
   padding: 8px 0 4px;
 }
 
-.country-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.country-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 38px;
-  padding: 0 4px 0 12px;
-  border-radius: 19px;
-  background: var(--accent-soft);
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 500;
-}
-
-.country-chip__flag {
-  font-size: 18px;
-  line-height: 1;
-}
-
-.country-chip__remove {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  color: var(--text-2);
-}
-
-.country-chip__remove svg {
-  width: 16px;
-  height: 16px;
-}
-
-.select.country-select {
-  width: 100%;
-  max-width: none;
-}
-
 .planner-section .segmented {
   margin-bottom: 10px;
 }

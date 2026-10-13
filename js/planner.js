@@ -8,7 +8,6 @@ export const MODES = ['walk', 'car', 'bus', 'train', 'ferry', 'flight'];
 
 const STORAGE_KEY = 'route';
 const BRUTE_FORCE_LIMIT = 7;
-const COUNTRY_CODES = ('AD AE AF AG AI AL AM AO AR AT AU AW AZ BA BB BD BE BF BG BH BI BJ BM BN BO BR BS BT BW BY BZ CA CD CF CG CH CI CK CL CM CN CO CR CU CV CW CY CZ DE DJ DK DM DO DZ EC EE EG ER ES ET FI FJ FM FO FR GA GB GD GE GF GH GI GL GM GN GP GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IN IQ IR IS IT JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MG MH MK ML MM MN MO MQ MR MT MU MV MW MX MY MZ NA NC NE NG NI NL NO NP NR NZ OM PA PE PF PG PH PK PL PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SI SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TG TH TJ TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VI VN VU WS XK YE YT ZA ZM ZW').split(' ');
 const TRANSIT_ICON = {
   BUS: 'bus', COACH: 'bus', TRAM: 'train', SUBWAY: 'train', FERRY: 'ferry', AIRPLANE: 'flight',
   HIGHSPEED_RAIL: 'train', LONG_DISTANCE: 'train', NIGHT_RAIL: 'train', REGIONAL_FAST_RAIL: 'train',
@@ -16,7 +15,6 @@ const TRANSIT_ICON = {
 };
 
 const state = {
-  countries: [],
   startMode: 'gps',
   startPlace: null,
   stops: [],
@@ -55,7 +53,6 @@ function newId() {
 function restore() {
   const raw = load(STORAGE_KEY, null);
   if (!raw || typeof raw !== 'object') return;
-  state.countries = Array.isArray(raw.countries) ? raw.countries.filter((code) => COUNTRY_CODES.includes(code)).slice(0, 30) : [];
   state.startMode = raw.startMode === 'custom' ? 'custom' : 'gps';
   state.startPlace = validPlace(raw.startPlace);
   state.stops = Array.isArray(raw.stops) ? raw.stops.map(validPlace).filter(Boolean).slice(0, 40) : [];
@@ -69,25 +66,12 @@ function restore() {
 
 function persist() {
   const ok = save(STORAGE_KEY, {
-    countries: state.countries,
     startMode: state.startMode,
     startPlace: state.startPlace,
     stops: state.stops,
     modes: state.modes
   });
   if (!ok) toast(t('favorites.storageError'), { type: 'error', duration: 6000 });
-}
-
-function countryName(code) {
-  try {
-    return new Intl.DisplayNames([getLanguage()], { type: 'region' }).of(code) || code;
-  } catch {
-    return code;
-  }
-}
-
-function flag(code) {
-  return String.fromCodePoint(...[...code].map((char) => 0x1f1e6 + char.charCodeAt(0) - 65));
 }
 
 function startPoint() {
@@ -359,7 +343,7 @@ function makeSearch({ placeholder, onPick, compact = false }) {
       message.textContent = t('search.searching');
       results.replaceChildren();
       try {
-        const found = await searchPlaces(query, getLanguage(), { countries: state.countries });
+        const found = await searchPlaces(query, getLanguage());
         if (current !== token) return;
         if (!found.length) {
           message.textContent = t('search.noResults');
@@ -387,44 +371,6 @@ function makeSearch({ placeholder, onPick, compact = false }) {
   message,
   results);
   return form;
-}
-
-function renderCountries() {
-  const chips = state.countries.map((code) => el('span', { class: 'country-chip' },
-    el('span', { class: 'country-chip__flag', 'aria-hidden': 'true', text: flag(code) }),
-    el('span', { text: countryName(code) }),
-    el('button', {
-      type: 'button',
-      class: 'country-chip__remove',
-      'aria-label': `${t('route.removeCountry')}: ${countryName(code)}`,
-      onclick: () => {
-        state.countries = state.countries.filter((item) => item !== code);
-        persist();
-        renderCountries();
-      }
-    }, icon('close'))));
-  const collator = new Intl.Collator(getLanguage(), { sensitivity: 'base' });
-  const available = COUNTRY_CODES.filter((code) => !state.countries.includes(code))
-    .map((code) => ({ code, name: countryName(code) }))
-    .sort((a, b) => collator.compare(a.name, b.name));
-  const select = el('select', {
-    class: 'select select--compact country-select',
-    'aria-label': t('route.addCountry'),
-    onchange: () => {
-      if (!select.value) return;
-      state.countries = [...state.countries, select.value];
-      persist();
-      renderCountries();
-    }
-  },
-  el('option', { value: '', text: `+ ${t('route.addCountry')}` }),
-  available.map((item) => el('option', { value: item.code, text: `${flag(item.code)} ${item.name}` })));
-  dom.countries.replaceChildren(...[
-    el('div', { class: 'planner-label' }, el('span', { text: t('route.countries') })),
-    chips.length ? el('div', { class: 'country-chips' }, chips) : null,
-    select,
-    state.countries.length ? el('p', { class: 'planner-hint', text: t('route.countriesHint') }) : null
-  ].filter(Boolean));
 }
 
 async function useGps() {
@@ -738,8 +684,7 @@ export function addStop(place) {
   return true;
 }
 
-export function applyPlan({ countries = [], startPlace = null, stops = [] } = {}) {
-  state.countries = countries.filter((code) => COUNTRY_CODES.includes(code));
+export function applyPlan({ startPlace = null, stops = [] } = {}) {
   if (startPlace) {
     state.startMode = 'custom';
     state.startPlace = validPlace({ ...startPlace, id: 'start' });
@@ -748,7 +693,6 @@ export function applyPlan({ countries = [], startPlace = null, stops = [] } = {}
   state.modes = {};
   state.auto = {};
   persist();
-  renderCountries();
   update();
   fitRoute();
 }
@@ -914,7 +858,6 @@ function initDrag() {
 export function initPlanner(container, opts) {
   options = opts;
   restore();
-  dom.countries = el('section', { class: 'planner-section' });
   dom.start = el('section', { class: 'planner-section' });
   dom.list = el('ol', { class: 'route-list' });
   dom.empty = el('p', { class: 'empty empty--compact planner-empty' });
@@ -923,7 +866,6 @@ export function initPlanner(container, opts) {
   dom.clear = el('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: clearRoute });
   dom.actions = el('div', { class: 'route-actions' }, dom.optimize, dom.clear);
   container.replaceChildren(el('div', { class: 'planner' },
-    dom.countries,
     dom.start,
     el('section', { class: 'planner-section planner-section--route' }, dom.list, dom.empty),
     dom.add,
@@ -945,7 +887,6 @@ export function initPlanner(container, opts) {
 }
 
 export function renderPlanner() {
-  renderCountries();
   renderStart();
   dom.add.replaceChildren(
     el('div', { class: 'planner-label' }, el('span', { text: t('route.addStop') })),
