@@ -297,11 +297,31 @@ export function zoomInTo(minZoom) {
   return moveTo(map.getCenter(), Math.max(minZoom, map.getZoom() + 1));
 }
 
+const CITY_KINDS = ['city', 'municipality', 'city_district', 'borough'];
+const TOWN_KINDS = ['town', 'suburb', 'quarter'];
+const VILLAGE_KINDS = ['village', 'hamlet', 'neighbourhood', 'isolated_dwelling', 'locality'];
+
+function spanKm(bounds) {
+  const a = L.latLng(bounds.south, bounds.west);
+  const b = L.latLng(bounds.north, bounds.east);
+  return a.distanceTo(b) / 1000;
+}
+
+export function searchResultZoom(result) {
+  if (CITY_KINDS.includes(result.kind)) return 13;
+  if (TOWN_KINDS.includes(result.kind)) return 14;
+  if (VILLAGE_KINDS.includes(result.kind)) return 15;
+  if (result.rank >= 26) return 17;
+  if (result.rank >= 20) return 15;
+  if (result.rank >= 17) return 14;
+  if (result.rank >= 16) return 13;
+  if (result.bounds && spanKm(result.bounds) <= 60) return 13;
+  return null;
+}
+
 export function showSearchResult(result) {
-  if (result.rank >= 16 || !result.bounds) {
-    const zoom = result.rank >= 26 ? 17 : result.rank >= 20 ? 15 : result.rank >= 17 ? 14 : 13;
-    return moveTo([result.lat, result.lon], zoom);
-  }
+  const zoom = searchResultZoom(result);
+  if (zoom !== null || !result.bounds) return moveTo([result.lat, result.lon], zoom ?? 13);
   return new Promise((resolve) => {
     const bounds = L.latLngBounds([result.bounds.south, result.bounds.west], [result.bounds.north, result.bounds.east]);
     map.once('moveend', () => resolve());

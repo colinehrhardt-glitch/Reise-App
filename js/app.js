@@ -846,11 +846,17 @@ async function chooseSearchResult(result) {
   updateClearButton();
   dom.searchInput.blur();
   mapView.closePopup();
-  const local = result.rank >= 16 || !result.bounds;
+  const local = mapView.searchResultZoom(result) !== null || !result.bounds;
   if (!wideQuery.matches) setSheet(local ? 'half' : 'peek');
   await mapView.showSearchResult(result);
   if (mapView.getZoom() >= MIN_SEARCH_ZOOM) searchArea({ areaName: result.name });
   else toast(t('search.zoomHint'), { duration: 5000 });
+}
+
+function isClearWinner(results) {
+  if (results.length === 1) return true;
+  const [first, second] = results;
+  return first.importance >= 0.4 && first.importance >= second.importance * 1.25;
 }
 
 async function handleSearch(event) {
@@ -867,7 +873,7 @@ async function handleSearch(event) {
     const results = await searchPlaces(query, getLanguage());
     if (token !== state.searchToken) return;
     if (!results.length) showSearchMessage(t('search.noResults'), true);
-    else if (results.length === 1) chooseSearchResult(results[0]);
+    else if (isClearWinner(results)) chooseSearchResult(results[0]);
     else renderSearchResults(results);
   } catch (error) {
     if (token !== state.searchToken) return;

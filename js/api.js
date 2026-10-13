@@ -98,6 +98,8 @@ function normalizeSearchResult(item) {
     lat,
     lon,
     rank: Number(item.place_rank) || 0,
+    kind: String(item.addresstype || item.type || ''),
+    importance: Number(item.importance) || 0,
     bounds: box && box.every(Number.isFinite)
       ? { south: box[0], north: box[1], west: box[2], east: box[3] }
       : null
