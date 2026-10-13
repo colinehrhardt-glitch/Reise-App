@@ -92,6 +92,7 @@ let insets = { top: 0, right: 0, bottom: 0, left: 0 };
 let handlers = {};
 let accommodationsVisible = true;
 let routeLayer = null;
+let routeRenderer = null;
 let routeHandlers = {};
 const resultMarkers = new Map();
 const favoriteMarkers = new Map();
@@ -173,6 +174,7 @@ export function initMap(container, options = {}) {
 
   cluster = createCluster(null).addTo(map);
   favoritesLayer = L.layerGroup().addTo(map);
+  routeRenderer = L.svg({ padding: 1.5 });
   routeLayer = L.featureGroup().addTo(map);
 
   map.on('moveend zoomend', () => handlers.onViewChange?.());
@@ -212,7 +214,7 @@ function useRaster() {
 }
 
 function createVector(theme) {
-  const layer = L.maplibreGL({ style: VECTOR_STYLES[theme], attributionControl: false, interactive: false });
+  const layer = L.maplibreGL({ style: VECTOR_STYLES[theme], attributionControl: false, interactive: false, updateInterval: 8, padding: 0.3 });
   layer.addTo(map);
   const gl = layer.getMaplibreMap();
   const entry = { kind: 'vector', layer, gl, loaded: false, theme };
@@ -600,20 +602,97 @@ function stopIcon(label, start) {
   });
 }
 
+function pathLength(coords) {
+  let total = 0;
+  for (let i = 1; i < coords.length; i += 1) total += L.latLng(coords[i - 1]).distanceTo(L.latLng(coords[i]));
+  return total;
+}
+
+function pointAt(coords, fraction) {
+  const target = pathLength(coords) * fraction;
+  let travelled = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const a = L.latLng(coords[i - 1]);
+    const b = L.latLng(coords[i]);
+    const step = a.distanceTo(b);
+    if (travelled + step >= target && step > 0) {
+      const f = (target - travelled) / step;
+      const lat = a.lat + (b.lat - a.lat) * f;
+      const lng = a.lng + (b.lng - a.lng) * f;
+      const pa = L.CRS.EPSG3857.latLngToPoint(a, 0);
+      const pb = L.CRS.EPSG3857.latLngToPoint(b, 0);
+      return { latlng: [lat, lng], angle: Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180 / Math.PI };
+    }
+    travelled += step;
+  }
+  return null;
+}
+
+function arrowIcon(color, angle) {
+  return L.divIcon({
+    className: 'marker-icon',
+    html: `<div class="route-arrow" style="--c:${color};transform:rotate(${angle.toFixed(1)}deg)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 6.5 16 12l-7.5 5.5z"/></svg></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9]
+  });
+}
+
+function airportIcon(code) {
+  return L.divIcon({
+    className: 'marker-icon',
+    html: `<div class="route-airport"><span class="route-airport__dot"></span><span class="route-airport__label">${svg('flight')}<span>${code}</span></span></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6]
+  });
+}
+
+function drawLine(coords, style, options = {}) {
+  L.polyline(coords, { renderer: routeRenderer, color: '#ffffff', weight: options.weight + 3, opacity: 0.9, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(routeLayer);
+  return L.polyline(coords, {
+    renderer: routeRenderer,
+    color: style.color,
+    weight: options.weight,
+    opacity: options.opacity,
+    dashArray: options.dash || null,
+    lineCap: 'round',
+    lineJoin: 'round',
+    smoothFactor: 1.5
+  }).addTo(routeLayer);
+}
+
+function addArrows(coords, color, index) {
+  const length = pathLength(coords);
+  if (length < 300) return;
+  const fractions = length > 400000 ? [0.25, 0.5, 0.75] : [0.5];
+  for (const fraction of fractions) {
+    const spot = pointAt(coords, fraction);
+    if (!spot) continue;
+    const marker = L.marker(spot.latlng, { icon: arrowIcon(color, spot.angle), keyboard: false, zIndexOffset: 900 }).addTo(routeLayer);
+    marker.on('click', () => routeHandlers.onLegClick?.(index));
+  }
+}
+
 export function renderRoute(points, legs) {
   routeLayer.clearLayers();
   legs.forEach((leg, index) => {
-    if (!leg || !Array.isArray(leg.coords) || leg.coords.length < 2) return;
+    if (!leg) return;
     const style = ROUTE_MODES[leg.mode] || ROUTE_MODES.car;
-    L.polyline(leg.coords, { color: '#ffffff', weight: 9, opacity: 0.85, interactive: false, lineCap: 'round' }).addTo(routeLayer);
-    const line = L.polyline(leg.coords, {
-      color: style.color,
-      weight: 5,
-      opacity: leg.estimate ? 0.8 : 0.95,
-      dashArray: style.dash || (leg.estimate ? '8 8' : null),
-      lineCap: 'round'
-    }).addTo(routeLayer);
-    line.on('click', () => routeHandlers.onLegClick?.(index));
+    const segments = Array.isArray(leg.segments) && leg.segments.length ? leg.segments : [{ coords: leg.coords, kind: 'main' }];
+    for (const segment of segments) {
+      if (!Array.isArray(segment.coords) || segment.coords.length < 2) continue;
+      const ground = segment.kind === 'ground';
+      const line = drawLine(segment.coords, ground ? { color: '#868e96' } : style, {
+        weight: ground ? 3 : 4.5,
+        opacity: ground ? 0.85 : leg.estimate ? 0.75 : 0.95,
+        dash: ground ? '2 7' : style.dash || (leg.estimate ? '10 8' : null)
+      });
+      line.on('click', () => routeHandlers.onLegClick?.(index));
+      if (!ground) addArrows(segment.coords, style.color, index);
+    }
+    for (const airport of leg.airports || []) {
+      if (!airport) continue;
+      L.marker([airport.lat, airport.lon], { icon: airportIcon(airport.iata), keyboard: false, zIndexOffset: 1000, title: airport.name || airport.iata }).addTo(routeLayer);
+    }
   });
   points.forEach((point, index) => {
     const marker = L.marker([point.lat, point.lon], {

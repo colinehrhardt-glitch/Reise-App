@@ -2768,3 +2768,111 @@ body[data-tab="route"] .area-btn {
     padding-left: 44px;
   }
 }
+
+.route-arrow {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--c);
+  border: 2px solid #fff;
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.route-arrow svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.route-airport {
+  position: relative;
+  width: 12px;
+  height: 12px;
+}
+
+.route-airport__dot {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #343a40;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.route-airport__label {
+  position: absolute;
+  left: 14px;
+  top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px 0 5px;
+  border-radius: 11px;
+  background: #343a40;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  white-space: nowrap;
+}
+
+.route-airport__label svg {
+  width: 13px;
+  height: 13px;
+}
+
+.flight-route {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.flight-route__code {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.flight-route__line {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 22px;
+  color: var(--text-2);
+}
+
+.flight-route__line::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 2px dashed var(--border-strong);
+}
+
+.flight-route__line svg {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
+.flight-route__names,
+.flight-route__time {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  color: var(--text-2);
+}

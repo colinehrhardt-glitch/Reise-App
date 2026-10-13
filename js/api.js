@@ -732,3 +732,43 @@ export async function reverseGeocode(lat, lon, lang) {
   return name;
 }
 
+const AIRPORT_RADIUS = 120000;
+const airportCache = new Map(Object.entries(load('airports', {}) || {}));
+
+function airportKey(lat, lon) {
+  return `${lat.toFixed(2)},${lon.toFixed(2)}`;
+}
+
+function airportScore(airport, origin) {
+  const km = roughKm(origin, airport);
+  const bonus = airport.international ? 0.6 : airport.public ? 0.85 : 1;
+  return km * bonus;
+}
+
+export async function nearestAirport(point, signal = null) {
+  const key = airportKey(point.lat, point.lon);
+  if (airportCache.has(key)) return airportCache.get(key);
+  const query = `[out:json][timeout:20];nwr["aeroway"="aerodrome"]["iata"](around:${AIRPORT_RADIUS},${point.lat.toFixed(5)},${point.lon.toFixed(5)});out tags center 30;`;
+  const elements = await queryOverpass(query, signal);
+  const airports = elements.map((element) => {
+    const position = coordinates(element);
+    const tags = element.tags || {};
+    if (!position || !/^[A-Z]{3}$/.test(tags.iata || '')) return null;
+    if (tags.military === 'airfield' || tags['aerodrome:type'] === 'military' || tags['aerodrome:type'] === 'private') return null;
+    return {
+      iata: tags.iata,
+      name: cleanText(tags[`name:${navigator.language.slice(0, 2)}`] || tags.name).slice(0, 80) || tags.iata,
+      lat: position.lat,
+      lon: position.lon,
+      international: tags['aerodrome:type'] === 'international' || tags.aerodrome === 'international',
+      public: tags['aerodrome:type'] === 'public' || tags.aerodrome === 'public'
+    };
+  }).filter(Boolean);
+  airports.sort((a, b) => airportScore(a, point) - airportScore(b, point));
+  const best = airports[0] || null;
+  airportCache.set(key, best);
+  const entries = [...airportCache.entries()].slice(-80);
+  save('airports', Object.fromEntries(entries));
+  return best;
+}
+
