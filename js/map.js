@@ -8,6 +8,18 @@ export const ICONS = {
   shopping: '<path d="M3.5 4.5h2.2l2 10h10.1l2-7H7.1"/><circle cx="9.5" cy="19" r="1.3"/><circle cx="16.5" cy="19" r="1.3"/>',
   health: '<path d="M9.5 4h5v5.5H20v5h-5.5V20h-5v-5.5H4v-5h5.5z"/>',
   food: '<path d="M7 3v6.5a2 2 0 0 0 2 2V21M11 3v6.5a2 2 0 0 1-2 2M9 3v5"/><path d="M17 21V3c-2 1.5-3 4-3 7v3.5h3"/>',
+  transport: '<rect x="6" y="3.5" width="12" height="14" rx="3"/><path d="M6 11h12M9 21l1.5-3.5M15 21l-1.5-3.5"/><circle cx="9.2" cy="14.3" r=".7"/><circle cx="14.8" cy="14.3" r=".7"/>',
+  car: '<path d="M4 13.5 6 8h12l2 5.5V18H4z"/><path d="M4 13.5h16"/><path d="M6.5 18v2M17.5 18v2"/>',
+  walk: '<circle cx="13" cy="4.5" r="1.8"/><path d="m9 21 2.5-6.5L14 16v5M9.5 10.5 12 8l3 3 2.5 1M11.5 14.5 12 8"/>',
+  bus: '<rect x="5" y="3.5" width="14" height="14" rx="2.5"/><path d="M5 10.5h14M8 21v-3.5M16 21v-3.5"/><circle cx="8.5" cy="14" r=".7"/><circle cx="15.5" cy="14" r=".7"/>',
+  train: '<rect x="6" y="3.5" width="12" height="14" rx="3"/><path d="M6 11h12M9 21l1.5-3.5M15 21l-1.5-3.5"/><circle cx="9.2" cy="14.3" r=".7"/><circle cx="14.8" cy="14.3" r=".7"/>',
+  ferry: '<path d="M3 17.5c1.5 1.2 3 1.2 4.5 0s3-1.2 4.5 0 3 1.2 4.5 0 3-1.2 4.5 0"/><path d="M5 14.5 6 10h12l1 4.5"/><path d="M9 10V6.5h6V10M12 3.5v3"/>',
+  flight: '<path d="M10.5 13.5 4 11l1.2-1.6 7 1.1 4-4.3c.8-.9 2.2-1 3-.2.8.8.7 2.2-.2 3l-4.3 4 1.1 7L14.4 21l-2.5-6.5L8.5 18l.3 2.2-1.2 1-1.4-3.4L2.8 16.4l1-1.2 2.2.3z"/>',
+  grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  swap: '<path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/>',
+  sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+  locate: '<circle cx="12" cy="12" r="3.5"/><circle cx="12" cy="12" r="7.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22"/>',
   heart: '<path d="M12 20.2s-7.5-4.6-7.5-10.4A4.3 4.3 0 0 1 12 7a4.3 4.3 0 0 1 7.5 2.8c0 5.8-7.5 10.4-7.5 10.4z"/>',
   pin: '<path d="M12 21s-6.5-6-6.5-11.5a6.5 6.5 0 0 1 13 0C18.5 15 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.3"/>',
   globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5S9.7 5.9 12 3.5z"/>',
@@ -33,7 +45,8 @@ export const LAYERS = {
   money: { color: '#0c8599' },
   shopping: { color: '#7048e8' },
   health: { color: '#e03131' },
-  food: { color: '#f59f00' }
+  food: { color: '#f59f00' },
+  transport: { color: '#8a5a2b' }
 };
 
 export const FAVORITE_COLOR = '#e64980';

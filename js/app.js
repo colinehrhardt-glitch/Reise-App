@@ -2,6 +2,7 @@ import { t, tCount, getLanguage, setLanguage, onLanguageChange, applyTranslation
 import { load, save } from './storage.js';
 import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
+import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
@@ -115,36 +116,6 @@ function sanitizeFavorites(raw) {
   return result;
 }
 
-function el(tag, props = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (value === null || value === undefined || value === false) continue;
-    if (key === 'class') node.className = value;
-    else if (key === 'text') node.textContent = value;
-    else if (key === 'style') node.style.cssText = value;
-    else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value);
-    else node.setAttribute(key, value === true ? '' : value);
-  }
-  for (const child of children.flat()) {
-    if (child !== null && child !== undefined && child !== false) node.append(child);
-  }
-  return node;
-}
-
-function icon(name) {
-  const template = document.createElement('template');
-  template.innerHTML = mapView.svg(name);
-  return template.content.firstElementChild;
-}
-
-function link(href, label, className = null) {
-  return el('a', { class: className, href, target: '_blank', rel: 'noopener noreferrer', text: label });
-}
-
-function formatNumber(n) {
-  return new Intl.NumberFormat(getLanguage()).format(n);
-}
-
 function typeLabel(type, many = false) {
   return t(`types.${type}.${many ? 'many' : 'one'}`);
 }
@@ -170,58 +141,12 @@ function starLabel(stars) {
   return stars.superior ? `${label} ${t('place.superior')}` : label;
 }
 
-function distance(a, b) {
-  const rad = Math.PI / 180;
-  const dLat = (b.lat - a.lat) * rad;
-  const dLon = (b.lon - a.lon) * rad;
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
-  return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
 function isInside(point, bounds) {
   return point.lat >= bounds.south && point.lat <= bounds.north && point.lon >= bounds.west && point.lon <= bounds.east;
 }
 
 function isFavorite(id) {
   return Object.prototype.hasOwnProperty.call(state.favorites, id);
-}
-
-function errorMessage(error) {
-  const code = error && error.code ? error.code : 'server';
-  const key = `errors.${code}`;
-  const message = t(key);
-  return message === key ? t('errors.server') : message;
-}
-
-function toast(message, { type = 'info', action = null, duration = 4000 } = {}) {
-  for (const existing of dom.toasts.querySelectorAll('.toast')) {
-    if (existing.dataset.message === message) existing.remove();
-  }
-  const node = el('div', {
-    class: `toast${type === 'error' ? ' toast--error' : ''}`,
-    role: type === 'error' ? 'alert' : 'status',
-    'data-message': message
-  }, el('span', { class: 'toast__text', text: message }));
-  let timer = 0;
-  const dismiss = () => {
-    clearTimeout(timer);
-    node.classList.add('is-leaving');
-    setTimeout(() => node.remove(), 260);
-  };
-  if (action) {
-    node.append(el('button', {
-      type: 'button',
-      class: 'toast__action',
-      text: action.label,
-      onclick: () => {
-        dismiss();
-        action.onClick();
-      }
-    }));
-  }
-  dom.toasts.append(node);
-  while (dom.toasts.children.length > 3) dom.toasts.firstElementChild.remove();
-  timer = setTimeout(dismiss, duration);
 }
 
 function isDark() {
@@ -657,6 +582,7 @@ function poiFacts(facts = {}) {
   if (facts.allDay) list.push(t('fact.allDay'));
   if (facts.emergency) list.push(t('fact.emergency'));
   if (facts.atm) list.push(t('fact.atm'));
+  if (facts.iata) list.push(t('fact.iata', { code: facts.iata }));
   if (facts.fee) list.push(t(facts.fee === 'yes' ? 'fact.fee' : 'fact.noFee'));
   if (facts.wheelchair) list.push(t(facts.wheelchair === 'yes' ? 'fact.wheelchair' : 'fact.wheelchairLimited'));
   return list;

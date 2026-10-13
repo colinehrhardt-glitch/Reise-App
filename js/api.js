@@ -21,14 +21,40 @@ const PERSIST_ITEMS = 1500;
 export const ACCOMMODATION_TYPES = ['hotel', 'hostel', 'guest_house', 'apartment', 'motel'];
 
 export const CATEGORIES = {
-  accommodation: { key: 'tourism', values: ACCOMMODATION_TYPES, limit: 1000 },
-  money: { key: 'amenity', values: ['atm', 'bank', 'bureau_de_change'], limit: 400 },
-  shopping: { key: 'shop', values: ['supermarket', 'convenience', 'kiosk'], limit: 400 },
-  health: { key: 'amenity', values: ['pharmacy', 'hospital', 'clinic', 'doctors'], limit: 400 },
-  food: { key: 'amenity', values: ['restaurant', 'cafe', 'fast_food'], limit: 600 }
+  accommodation: { rules: [{ key: 'tourism', values: ACCOMMODATION_TYPES }], limit: 1000 },
+  money: { rules: [{ key: 'amenity', values: ['atm', 'bank', 'bureau_de_change'] }], limit: 400 },
+  shopping: { rules: [{ key: 'shop', values: ['supermarket', 'convenience', 'kiosk'] }], limit: 400 },
+  health: { rules: [{ key: 'amenity', values: ['pharmacy', 'hospital', 'clinic', 'doctors'] }], limit: 400 },
+  food: { rules: [{ key: 'amenity', values: ['restaurant', 'cafe', 'fast_food'] }], limit: 600 },
+  transport: {
+    rules: [
+      { key: 'aeroway', values: ['aerodrome'], require: 'iata', type: 'airport' },
+      { key: 'railway', values: ['station'], exclude: ['subway', 'light_rail', 'monorail', 'funicular', 'miniature'], type: 'train_station' },
+      { key: 'amenity', values: ['bus_station'] },
+      { key: 'amenity', values: ['ferry_terminal'] }
+    ],
+    limit: 400
+  }
 };
 
-export const POI_CATEGORIES = ['money', 'shopping', 'health', 'food'];
+export const POI_CATEGORIES = ['transport', 'money', 'shopping', 'health', 'food'];
+
+function ruleFilter(rule) {
+  const value = rule.values.length === 1 ? `="${rule.values[0]}"` : `~"^(${rule.values.join('|')})$"`;
+  const require = rule.require ? `["${rule.require}"]` : '';
+  const exclude = rule.exclude ? `["station"!~"^(${rule.exclude.join('|')})$"]` : '';
+  return `nwr["${rule.key}"${value}]${require}${exclude}`;
+}
+
+export function classify(tags, category) {
+  for (const rule of CATEGORIES[category].rules) {
+    if (!rule.values.includes(tags[rule.key])) continue;
+    if (rule.require && !tags[rule.require]) continue;
+    if (rule.exclude && rule.exclude.includes(tags.station)) continue;
+    return rule.type || tags[rule.key];
+  }
+  return null;
+}
 
 export class ApiError extends Error {
   constructor(code, status = 0) {
@@ -162,8 +188,9 @@ function isInside(item, bounds) {
 function buildQuery(categories, bounds) {
   const box = [bounds.south, bounds.west, bounds.north, bounds.east].map((value) => value.toFixed(5)).join(',');
   const parts = categories.map((category, index) => {
-    const { key, values, limit } = CATEGORIES[category];
-    return `nwr["${key}"~"^(${values.join('|')})$"](${box})->.s${index};.s${index} out tags center qt ${limit};`;
+    const { rules, limit } = CATEGORIES[category];
+    const union = rules.map((rule) => `${ruleFilter(rule)}(${box});`).join('');
+    return `(${union})->.s${index};.s${index} out tags center qt ${limit};`;
   });
   return `[out:json][timeout:22];${parts.join('')}`;
 }
@@ -336,11 +363,11 @@ export async function fetchCategories(categories, bounds, { signal = null, onWai
   for (const element of elements) {
     const tags = element.tags || {};
     for (const category of missing) {
-      const { key, values } = CATEGORIES[category];
-      if (!values.includes(tags[key])) continue;
+      const type = classify(tags, category);
+      if (!type) continue;
       const id = `${element.type}/${element.id}`;
       if (grouped[category].has(id)) continue;
-      const item = category === 'accommodation' ? normalizeAccommodation(element) : normalizePoi(element, category);
+      const item = category === 'accommodation' ? normalizeAccommodation(element) : normalizePoi(element, category, type);
       if (item) grouped[category].set(id, item);
     }
   }
@@ -384,16 +411,15 @@ function normalizeAccommodation(element) {
   };
 }
 
-function normalizePoi(element, category) {
+function normalizePoi(element, category, type) {
   const tags = element.tags || {};
   const position = coordinates(element);
   if (!position) return null;
-  const { key } = CATEGORIES[category];
   return {
     id: `${element.type}/${element.id}`,
     kind: 'poi',
     category,
-    type: tags[key],
+    type,
     name: cleanText(tags.name) || null,
     lat: position.lat,
     lon: position.lon,
@@ -429,6 +455,7 @@ function poiFacts(tags) {
   if (tags.emergency === 'yes') facts.emergency = true;
   if (tags.amenity === 'bank' && tags.atm === 'yes') facts.atm = true;
   if (tags.amenity === 'atm' && (tags.fee === 'no' || tags.fee === 'yes')) facts.fee = tags.fee;
+  if (tags.aeroway === 'aerodrome' && /^[A-Z]{3}$/.test(tags.iata || '')) facts.iata = tags.iata;
   return facts;
 }
 
