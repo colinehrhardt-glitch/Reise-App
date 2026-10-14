@@ -1,6 +1,6 @@
 # Viaro
 
-Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte, Stufe 2: Transport und Routen-Planer.
+Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte, Stufe 2: Transport und Routen-Planer, Stufe 3: Entdecken (Infos, Wetter, Sehenswürdigkeiten).
 
 ## Funktionen
 - Vollbild-Karte (OSM-Daten, Vektorkarte von OpenFreeMap, Rückfall auf OSM-Kacheln); öffnet an der zuletzt angesehenen Stelle, der Standort wird nur auf Wunsch abgefragt
@@ -20,6 +20,13 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - Transfers: Anreise von der Unterkunft zum Flughafen/Bahnhof/Busbahnhof und weiter zur nächsten Unterkunft mit Taxi-/Uber-Fahrzeit, Fußweg und Links zu Uber und Bus & Bahn
 - Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen; keine geschätzte Bahn in Ländern ohne Personenzüge (z. B. Kolumbien)
 - Verkehrsmittel je Etappe: Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
+- Reiter „Entdecken“ für den gesuchten Ort, jeden Ort der Route oder die Kartenmitte:
+  - Kurzinfo aus Wikipedia mit Bild
+  - Wetter (Open-Meteo): jetzt und bis 16 Tage, Aufenthaltstage markiert; für spätere Reisedaten typisches Wetter der letzten 3 Jahre
+  - Sehenswürdigkeiten (OpenStreetMap) nach Bekanntheit sortiert (Wikidata), mit Foto, Wikipedia-Text, Filter nach Art und eigener Karten-Ebene; „Für <Ort> merken“ – erscheint am Ort in der Route und im Reiseplan
+  - Land & Geld (REST Countries, ExchangeRate-API): Hauptstadt, Sprachen, Währung mit Umrechnung, Vorwahl, Ortszeit, Fahrseite
+  - Sicherheit: Reisewarnstufe des Auswärtigen Amts (falls direkt abrufbar, sonst Link) und Abschnitt aus Wikivoyage
+  - Tipps aus Wikivoyage: Herumkommen, Essen, Ausgehen, Verhalten vor Ort, Gesundheit (Rückfall auf die Länderseite)
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus
 
@@ -38,6 +45,8 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/planner.js` – Routen-Planer
 - `js/overview.js` – Reiseplan, Kalender-Export, Teilen
 - `js/recent.js` – zuletzt gesuchte Orte
+- `js/discover.js` – Reiter „Entdecken“
+- `js/info.js` – Abfragen für Wikipedia, Wikivoyage, Wikidata, Open-Meteo, REST Countries, Wechselkurse, Auswärtiges Amt und Sehenswürdigkeiten (mit Cache)
 - `sw.js`, `manifest.webmanifest`, `icons/` – App-Installation und Offline-Start
 - `js/ui.js` – gemeinsame Bausteine (Elemente, Symbole, Hinweise)
 - `data/airports.json` – Flughäfen mit Linienverkehr (aus OurAirports, gemeinfrei)
@@ -45,7 +54,7 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/storage.js` – localStorage
 
 ## Datenquellen
-Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap © OpenMapTiles, Fotos Wikimedia Commons, Flughäfen OurAirports (Public Domain), Routen OSRM und FOSSGIS, Bus/Bahn Transitous (ehrenamtlicher Dienst für Open-Source-Projekte). Kostenlose Dienste ohne API-Schlüssel – bitte schonend nutzen. Bewertungen und echte Preise gibt es erst mit Partner-Anbindung (Stufe 6).
+Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap © OpenMapTiles, Fotos Wikimedia Commons, Texte Wikipedia und Wikivoyage (CC BY-SA), Wetter Open-Meteo (CC BY 4.0), Länderdaten REST Countries, Wechselkurse ExchangeRate-API (open.er-api.com), Reisehinweise Auswärtiges Amt (OpenData), Flughäfen OurAirports (Public Domain), Routen OSRM und FOSSGIS, Bus/Bahn Transitous (ehrenamtlicher Dienst für Open-Source-Projekte). Kostenlose Dienste ohne API-Schlüssel – bitte schonend nutzen. Bewertungen und echte Preise gibt es erst mit Partner-Anbindung (Stufe 6).
 
 ## Lizenz
 MIT – siehe `LICENSE`.
@@ -53,7 +62,8 @@ MIT – siehe `LICENSE`.
 ## Offene Punkte für Stufe 5 (eigener Server)
 - **KI-Reiseplanung:** Vor der Reise fragt die App, welche Länder und Städte dabei sein sollen. Die KI schlägt daraus Routen, weitere Orte und Aktivitäten vor; alles bleibt danach von Hand änderbar. Die Länder-Auswahl gehört zu diesem Schritt (nicht in den Planer). Der Planer übernimmt das Ergebnis über `applyPlan({ startPlace, stops })` in `js/planner.js`. Schlüssel nur auf dem Server, nie im Frontend.
 - **Ladezeit der Unterkünfte:** Der öffentliche Overpass-Server ist oft ausgelastet (Suchen dauern teils 10–20 s oder werden abgelehnt). Lösung: eigene, wöchentlich aktualisierte Kopie der OSM-Daten statt Live-Abfragen – entweder als fertige Datenpakete über GitHub (kostenlos) oder über den eigenen Server. Ein reiner Weiterleitungs-Server hilft nicht.
-- **Zusatz-Ebenen** (Geld, Einkaufen, Gesundheit, Essen) hängen ebenfalls am Overpass-Server und sollen mit umziehen.
+- **Zusatz-Ebenen** (Geld, Einkaufen, Gesundheit, Essen) und die **Sehenswürdigkeiten** hängen ebenfalls am Overpass-Server und sollen mit umziehen.
+- **Reisehinweise:** Falls der Browser die OpenData-Schnittstelle des Auswärtigen Amts nicht direkt abrufen darf (CORS), über den eigenen Server holen; dort auch den vollständigen Text der Sicherheitshinweise aufbereiten.
 - **Hostelworld:** Partnerprogramm (partners.hostelworld.com) beantragen; Preise und Bilder nur mit Partner-Zugang und über den Server (Schlüssel nie im Frontend). Bis dahin führt der Button über eine Google-Suche zu Hostelworld.
 - **Rome2Rio:** Zugang zur Routen-API anfragen (Bedingungen und mögliche Kosten klären, sonst Stufe 6). Liefert echte Abfahrtsorte je Busfirma (z. B. Terminal oder eigenes Büro), Fahrzeiten und ungefähre Preise – damit wird die Busbahnhof-Auswahl genauer als die heutige Schätzung aus OSM-Daten. Abfrage nur über den eigenen Server (Schlüssel nie im Frontend), Ergebnis ersetzt `stationEstimate` in `js/planner.js`.
 - **Google-Maps-Karte** wäre mit API-Schlüssel möglich (Kosten, Kreditkarte) – vorerst bei OpenFreeMap geblieben.

@@ -5,6 +5,7 @@ import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
 import { getRecent, addRecent } from './recent.js';
 import { buildIcs, downloadFile, shareText, overviewList } from './overview.js';
+import { SIGHT_TYPES } from './info.js';
 
 export const MODES = ['walk', 'car', 'bus', 'train', 'ferry', 'flight'];
 
@@ -13,6 +14,7 @@ const BRUTE_FORCE_LIMIT = 7;
 const DEFAULT_NIGHTS = 2;
 const MAX_NIGHTS = 90;
 const MAX_STAYS = 12;
+const MAX_SIGHTS = 30;
 const STAY_RADIUS = 30000;
 const TARGET_RADIUS = 60000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -52,7 +54,8 @@ const state = {
   gpsKey: null,
   locating: false,
   startEditing: false,
-  overviewOpen: false
+  overviewOpen: false,
+  sightsOpen: null
 };
 let options = {};
 const dom = {};
@@ -68,6 +71,7 @@ function validPlace(raw) {
     name: text(raw.name) || '?',
     detail: text(raw.detail),
     country: typeof raw.country === 'string' && /^[a-z]{2}$/.test(raw.country) ? raw.country : null,
+    wikidata: typeof raw.wikidata === 'string' && /^Q\d+$/.test(raw.wikidata) ? raw.wikidata : null,
     lat: raw.lat,
     lon: raw.lon
   };
@@ -95,13 +99,30 @@ function validStay(raw) {
   };
 }
 
+function validSight(raw) {
+  if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string' || !Number.isFinite(raw.lat) || !Number.isFinite(raw.lon)) return null;
+  return {
+    id: raw.id.slice(0, 40),
+    kind: 'sight',
+    name: raw.name.slice(0, 120),
+    type: SIGHT_TYPES.includes(raw.type) ? raw.type : 'attraction',
+    lat: raw.lat,
+    lon: raw.lon,
+    wikidata: typeof raw.wikidata === 'string' && /^Q\d+$/.test(raw.wikidata) ? raw.wikidata : null,
+    wikiTitle: typeof raw.wikiTitle === 'string' ? raw.wikiTitle.slice(0, 200) : null,
+    wikiLang: typeof raw.wikiLang === 'string' && /^[a-z]{2}$/.test(raw.wikiLang) ? raw.wikiLang : null,
+    image: typeof raw.image === 'string' && /^https:\/\//.test(raw.image) ? raw.image.slice(0, 400) : null
+  };
+}
+
 function validStop(raw) {
   const place = validPlace(raw);
   if (!place) return null;
   const nights = Number.isInteger(raw.nights) ? Math.min(MAX_NIGHTS, Math.max(0, raw.nights)) : DEFAULT_NIGHTS;
   const stays = Array.isArray(raw.stays) ? raw.stays.map(validStay).filter(Boolean).slice(0, MAX_STAYS) : [];
   const chosen = typeof raw.chosen === 'string' && stays.some((stay) => stay.id === raw.chosen) ? raw.chosen : null;
-  return { ...place, nights, noStay: raw.noStay === true, stays, chosen };
+  const sights = Array.isArray(raw.sights) ? raw.sights.map(validSight).filter(Boolean).slice(0, MAX_SIGHTS) : [];
+  return { ...place, nights, noStay: raw.noStay === true, stays, chosen, sights };
 }
 
 function validDate(value) {
@@ -1305,7 +1326,25 @@ function stopRow(stop, number, plan) {
         'aria-label': `${t('route.remove')}: ${stop.name}`,
         onclick: () => removeStop(stop.id)
       }, icon('close'))),
-    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
+    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop), sightsBlock(stop)));
+}
+
+function sightsBlock(stop) {
+  if (!stop.sights || !stop.sights.length) return null;
+  const open = state.sightsOpen === stop.id;
+  return el('div', { class: 'stop-sights' },
+    el('button', {
+      type: 'button',
+      class: 'stop-sights__toggle',
+      'aria-expanded': String(open),
+      onclick: () => {
+        state.sightsOpen = open ? null : stop.id;
+        renderList();
+      }
+    }, icon('sights'), el('span', { text: tCount('route.sightsCount', stop.sights.length) }), icon('chevron')),
+    open ? el('ul', { class: 'stop-sights__list' }, stop.sights.map((sight) => el('li', { class: 'stop-sights__item' },
+      el('button', { type: 'button', class: 'stop-sights__name', text: sight.name, onclick: () => options.onShowSight && options.onShowSight(sight) }),
+      el('button', { type: 'button', class: 'icon-btn stop-sights__remove', 'aria-label': `${t('route.removeSight')}: ${sight.name}`, onclick: () => toggleSight(stop.id, sight) }, icon('close'))))) : null);
 }
 
 function editStart() {
@@ -1325,7 +1364,7 @@ function startListRow(point, plan) {
   const stop = holder('start');
   return el('li', { class: `stop stop--start stop--full${needsStay(stop) ? ' needs-stay' : ''}` },
     head,
-    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
+    el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop), sightsBlock(stop)));
 }
 
 function reapplyAuto() {
@@ -1423,7 +1462,7 @@ function stayEvent(source, point, plan) {
       start: plan.arrival,
       end: plan.departure,
       summary: stay ? `${title}: ${stayName(stay)}` : title,
-      description: stay ? [stayName(stay), stay.address, stay.phone, stay.website].filter(Boolean).join('\n') : meta,
+      description: [stay ? [stayName(stay), stay.address, stay.phone, stay.website].filter(Boolean).join('\n') : meta, source.sights && source.sights.length ? `${t('route.overviewSightsLabel')}: ${source.sights.map((sight) => sight.name).join(', ')}` : null].filter(Boolean).join('\n'),
       location: stay ? [stayName(stay), stay.address || place].filter(Boolean).join(', ') : place,
       geo: stay ? { lat: stay.lat, lon: stay.lon } : { lat: point.lat, lon: point.lon }
     } : null
@@ -1463,6 +1502,18 @@ function legEvent(leg, plan) {
   return { type: 'leg', icon: leg.mode, color: mapView.ROUTE_MODES[leg.mode].color, when: dayLabel(leg.time, plan.leave), title: `${from} → ${to}${airports}`, meta, calendar };
 }
 
+function sightsEvent(source, point, plan) {
+  const names = source.sights.map((sight) => sight.name);
+  const shown = names.slice(0, 5).join(', ');
+  return {
+    type: 'sights',
+    icon: 'sights',
+    when: source.nights > 0 ? dayRange(plan) : dayLabel(plan.arrival, plan.day),
+    title: t('route.overviewSights', { place: point.linkName || point.name }),
+    meta: names.length > 5 ? `${shown} ${t('route.andMore', { n: names.length - 5 })}` : shown
+  };
+}
+
 function tripEvents() {
   const list = points();
   const plans = schedule();
@@ -1472,6 +1523,7 @@ function tripEvents() {
     const plan = plans[index];
     const source = point.holder ? holder('start') : point.start ? null : state.stops.find((stop) => stop.id === point.key);
     if (source && source.nights > 0) events.push(stayEvent(source, point, plan));
+    if (source && source.sights && source.sights.length) events.push(sightsEvent(source, point, plan));
     if (legList[index]) events.push(legEvent(legList[index], plan));
   });
   if (list.length > 1) {
@@ -1907,6 +1959,61 @@ function removeStay(stopId, stayId) {
   persist();
   render();
   if (options.onStaysChanged) options.onStaysChanged();
+}
+
+export function routePlaces() {
+  const list = points();
+  const plans = schedule();
+  return holders().map((stop) => {
+    const index = list.findIndex((point) => point.key === stop.id);
+    const plan = index >= 0 ? plans[index] : null;
+    return {
+      id: stop.id,
+      name: stop.name,
+      detail: stop.detail,
+      lat: stop.lat,
+      lon: stop.lon,
+      country: stop.country,
+      wikidata: stop.wikidata,
+      dates: plan && plan.arrival ? { from: isoDate(plan.arrival), to: isoDate(plan.departure) } : null
+    };
+  });
+}
+
+export function sightTargetFor(place, preferred = null) {
+  const candidates = holders();
+  const explicit = preferred ? candidates.find((stop) => stop.id === preferred) : null;
+  if (explicit && distance(explicit, place) <= TARGET_RADIUS) return explicit;
+  let best = null;
+  for (const stop of candidates) {
+    const d = distance(stop, place);
+    if (d <= STAY_RADIUS && (!best || d < best.d)) best = { stop, d };
+  }
+  return best ? best.stop : null;
+}
+
+export function sightStatus(stopId, sightId) {
+  const stop = holder(stopId);
+  return Boolean(stop && stop.sights && stop.sights.some((sight) => sight.id === sightId));
+}
+
+export function toggleSight(stopId, item) {
+  const stop = holder(stopId);
+  if (!stop) return false;
+  stop.sights = stop.sights || [];
+  const index = stop.sights.findIndex((sight) => sight.id === item.id);
+  if (index >= 0) {
+    stop.sights.splice(index, 1);
+  } else {
+    const sight = validSight(item);
+    if (!sight) return false;
+    if (stop.sights.length >= MAX_SIGHTS) stop.sights.shift();
+    stop.sights.push(sight);
+  }
+  persist();
+  render();
+  if (options.onSightsChanged) options.onSightsChanged();
+  return index < 0;
 }
 
 export function stayTargetFor(place) {

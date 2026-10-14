@@ -4,7 +4,9 @@ import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto,
 import * as mapView from './map.js';
 import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
 import { getRecent, addRecent, clearRecent } from './recent.js';
-import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, retryFailed, stayTargetFor, stayStatus, toggleStay, stayDatesFor } from './planner.js';
+import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, retryFailed, stayTargetFor, stayStatus, toggleStay, stayDatesFor, routePlaces, sightTargetFor, sightStatus, toggleSight } from './planner.js';
+import { initDiscover, renderDiscover, activateDiscover, setDiscoverPlace, discoverTitle, discoverSubtitle, refreshSights, currentStopId } from './discover.js';
+import { fetchSightSummary } from './info.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
@@ -12,7 +14,7 @@ const FAVORITE_SORTS = ['added', 'name', 'type', 'distance'];
 const RESULT_SORTS = ['recommended', 'stars', 'distance'];
 const THEMES = ['auto', 'light', 'dark'];
 const SHEET_ORDER = ['peek', 'half', 'full'];
-const TABS = ['stays', 'route'];
+const TABS = ['stays', 'route', 'discover'];
 const PHOTO_KINDS = ['commons', 'wikidata', 'url'];
 const HOSTELWORLD_TYPES = ['hostel', 'guest_house'];
 const wideQuery = window.matchMedia('(min-width: 768px)');
@@ -37,6 +39,7 @@ const state = {
   routeCount: '',
   areaName: null,
   areaCountry: null,
+  sights: [],
   areaController: null,
   loadFailed: null,
   sheet: 'peek',
@@ -237,6 +240,12 @@ function renderSources() {
     el('dd', {}, link('https://project-osrm.org', 'OSRM'), ', ', link('https://routing.openstreetmap.de', 'FOSSGIS'), ', ', link('https://transitous.org', 'Transitous')),
     el('dt', { text: t('about.airports') }),
     el('dd', {}, link('https://ourairports.com/data/', 'OurAirports'), ' (Public Domain)'),
+    el('dt', { text: t('about.texts') }),
+    el('dd', {}, link('https://www.wikipedia.org', 'Wikipedia'), ', ', link('https://www.wikivoyage.org', 'Wikivoyage'), ' (CC BY-SA)'),
+    el('dt', { text: t('about.weather') }),
+    el('dd', {}, link('https://open-meteo.com', 'Open-Meteo'), ' (CC BY 4.0)'),
+    el('dt', { text: t('about.countries') }),
+    el('dd', {}, link('https://restcountries.com', 'REST Countries'), ', ', link('https://www.exchangerate-api.com', 'ExchangeRate-API'), ', ', link('https://www.auswaertiges-amt.de', 'Auswärtiges Amt')),
     el('dt', { text: t('about.contact') }),
     el('dd', {}, link('https://github.com/colinehrhardt-glitch/Reise-App', 'GitHub')),
     el('dt', { text: t('about.photos') }),
@@ -585,9 +594,18 @@ function setStaysCount(value) {
 }
 
 function applyHeader() {
+  if (state.tab === 'discover') {
+    dom.sheetTitle.textContent = discoverTitle();
+    dom.resultsCount.textContent = discoverSubtitle();
+    return;
+  }
   const route = state.tab === 'route';
   dom.sheetTitle.textContent = route ? t('route.title') : state.staysTitle;
   dom.resultsCount.textContent = route ? state.routeCount : state.staysCount;
+}
+
+function renderSightLayer() {
+  mapView.renderPoiLayer('sights', state.sights, state.tab === 'discover');
 }
 
 function setTab(tab, { fit = true } = {}) {
@@ -597,18 +615,26 @@ function setTab(tab, { fit = true } = {}) {
   mapView.setRouteDimmed(tab !== 'route');
   save('tab', tab);
   const route = tab === 'route';
-  dom.tabStays.setAttribute('aria-selected', String(!route));
+  const discover = tab === 'discover';
+  dom.tabStays.setAttribute('aria-selected', String(tab === 'stays'));
   dom.tabRoute.setAttribute('aria-selected', String(route));
-  dom.chips.hidden = route;
-  dom.sheetBody.hidden = route;
+  dom.tabDiscover.setAttribute('aria-selected', String(discover));
+  dom.chips.hidden = tab !== 'stays';
+  dom.sheetBody.hidden = tab !== 'stays';
   dom.routeBody.hidden = !route;
-  dom.sheetHeader.setAttribute('aria-controls', route ? 'route-body' : 'sheet-body');
+  dom.discoverBody.hidden = !discover;
+  dom.sheetHeader.setAttribute('aria-controls', route ? 'route-body' : discover ? 'discover-body' : 'sheet-body');
   document.body.dataset.tab = tab;
   dom.sheet.dataset.tab = tab;
   applyHeader();
-  if (!wideQuery.matches && state.sheet === 'peek' && route) setSheet('half');
+  renderSightLayer();
+  if (!wideQuery.matches && state.sheet === 'peek' && (route || discover)) setSheet('half');
   else setSheet(state.sheet, false);
   if (route && changed && fit) fitRoute();
+  if (discover) {
+    if (changed) renderDiscover();
+    activateDiscover();
+  }
 }
 
 function stayButton(place) {
@@ -800,8 +826,91 @@ function poiContent(item) {
       routeButton(item)));
 }
 
+function sightSaveButton(item) {
+  const stop = sightTargetFor(item, currentStopId());
+  if (!stop) return null;
+  const saved = sightStatus(stop.id, item.id);
+  return el('button', {
+    type: 'button',
+    class: `btn ${saved ? 'btn--secondary is-saved' : 'btn--primary'} popup__stay`,
+    'aria-pressed': String(saved),
+    onclick: () => {
+      const added = toggleSight(stop.id, item);
+      toast(t(added ? 'sights.added' : 'sights.removed', { name: item.name, place: stop.name }), added ? { action: { label: t('route.show'), onClick: () => setTab('route') } } : {});
+      setTimeout(refreshOpenPopup, 0);
+    }
+  }, icon(saved ? 'check' : 'plus'), el('span', { text: t(saved ? 'sights.savedFor' : 'sights.saveFor', { place: stop.name }) }));
+}
+
+function sightPhoto(item) {
+  if (!item.image && !item.photo) return null;
+  const figure = el('figure', { class: 'popup__photo is-loading' });
+  if (item.image) {
+    const img = el('img', { alt: '', decoding: 'async', referrerpolicy: 'no-referrer' });
+    img.addEventListener('load', () => figure.classList.remove('is-loading'));
+    img.addEventListener('error', () => {
+      figure.remove();
+      mapView.refreshPopup();
+    });
+    img.src = item.image;
+    figure.append(img, el('figcaption', { class: 'popup__credit', text: t('photo.credit', { source: 'Wikimedia Commons' }) }));
+  } else {
+    loadPhoto(item, figure);
+  }
+  return figure;
+}
+
+function sightContent(item) {
+  const color = mapView.LAYERS.sights.color;
+  const typeText = t(`sights.type.${item.type}`);
+  const description = el('p', { class: 'popup__desc is-loading', text: t('sights.loadingText') });
+  const wiki = el('div', { class: 'popup__wiki' });
+  const lang = getLanguage();
+  if (item.wikidata || item.wikiTitle) {
+    fetchSightSummary(item, lang).then((summary) => {
+      if (!summary) {
+        description.remove();
+      } else {
+        description.classList.remove('is-loading');
+        description.textContent = summary.extract;
+        if (summary.url) wiki.replaceChildren(link(summary.url, t('discover.readWikipedia'), 'discover__link'), icon('external'));
+      }
+      mapView.refreshPopup();
+    }).catch(() => {
+      description.remove();
+      mapView.refreshPopup();
+    });
+  } else {
+    description.remove();
+  }
+  const facts = [];
+  if (item.fee === 'no') facts.push(t('sights.free'));
+  if (item.fee === 'yes') facts.push(t('sights.fee'));
+  return el('div', { class: 'popup' },
+    sightPhoto(item),
+    el('div', { class: 'popup__body' },
+      el('div', { class: 'popup__head' },
+        el('span', { class: 'type-badge', style: `--c:${color}` }, dot(color, `sight-${item.type}`), el('span', { text: typeText })),
+        closeButton()),
+      el('h3', { class: 'popup__title', text: item.name }),
+      factChips(facts),
+      description,
+      wiki,
+      contactRows(item),
+      sightSaveButton(item) || addToRouteButton(item),
+      routeButton(item)));
+}
+
 function contentFor(item) {
+  if (item.kind === 'sight') return sightContent(item);
   return item.kind === 'poi' ? poiContent(item) : popupContent(item);
+}
+
+async function showSight(item) {
+  if (!wideQuery.matches) setSheet('peek');
+  mapView.closePopup();
+  await mapView.focusPlace(item);
+  openItemPopup(item);
 }
 
 function openItemPopup(item) {
@@ -1041,6 +1150,8 @@ async function chooseSearchResult(result) {
   hideSearchPanel();
   addRecent(result);
   state.areaCountry = result.country || null;
+  setDiscoverPlace({ ...result, source: 'search' }, { silent: state.tab !== 'discover' });
+  if (state.tab === 'discover') activateDiscover();
   dom.searchInput.value = result.name;
   updateClearButton();
   dom.searchInput.blur();
@@ -1290,6 +1401,7 @@ function bindEvents() {
   dom.areaBtn.addEventListener('click', () => searchArea());
   dom.tabStays.addEventListener('click', () => setTab('stays'));
   dom.tabRoute.addEventListener('click', () => setTab('route'));
+  dom.tabDiscover.addEventListener('click', () => setTab('discover'));
   dom.resultsRetry.addEventListener('click', () => {
     if (state.loadFailed) state.loadFailed();
   });
@@ -1343,6 +1455,8 @@ function bindEvents() {
   onLanguageChange(() => {
     renderAll();
     renderPlanner();
+    renderDiscover();
+    activateDiscover();
     if (state.popupItem && mapView.getOpenPopupId() === state.popupItem.id) {
       mapView.updatePopup(contentFor(state.popupItem));
     }
@@ -1357,7 +1471,7 @@ function collectDom() {
     searchClear: 'search-clear', searchPanel: 'search-panel', searchMessage: 'search-message', searchResults: 'search-results',
     areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
     layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
-    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', sheetTabs: 'sheet-tabs', tabStays: 'tab-stays', tabRoute: 'tab-route', routeBody: 'route-body', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
+    resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', sheetTabs: 'sheet-tabs', tabStays: 'tab-stays', tabRoute: 'tab-route', tabDiscover: 'tab-discover', routeBody: 'route-body', discoverBody: 'discover-body', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
     resultsSort: 'results-sort', resultsEmpty: 'results-empty', recent: 'recent', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
@@ -1403,7 +1517,30 @@ function init() {
     onShow: () => setTab('route', { fit: false }),
     onFindStay: findStayFor,
     onShowStay: showStay,
-    onStaysChanged: refreshOpenPopup
+    onShowSight: showSight,
+    onStaysChanged: refreshOpenPopup,
+    onSightsChanged: () => {
+      refreshSights();
+      refreshOpenPopup();
+    }
+  });
+  initDiscover(dom.discoverBody, {
+    isActive: () => state.tab === 'discover',
+    getStops: routePlaces,
+    getCenter: () => mapView.getVisibleCenter(),
+    onShowSight: showSight,
+    sightTarget: (item) => sightTargetFor(item, currentStopId()),
+    sightSaved: sightStatus,
+    toggleSight: (stopId, item) => toggleSight(stopId, item),
+    onSights: (items) => {
+      state.sights = items;
+      renderSightLayer();
+    },
+    onHeader: applyHeader,
+    onPlaceChange: (place) => {
+      if (!wideQuery.matches && state.sheet === 'full') setSheet('half');
+      mapView.flyToLocation(place.lat, place.lon, Math.max(12, Math.min(mapView.getZoom(), 14)));
+    }
   });
   renderAll();
   initSheet();

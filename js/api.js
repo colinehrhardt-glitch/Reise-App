@@ -83,7 +83,7 @@ function nominatimTurn(signal = null) {
   return turn;
 }
 
-async function request(url, options = {}, timeout = 30000, signal = null) {
+export async function request(url, options = {}, timeout = 30000, signal = null) {
   if (signal && signal.aborted) throw new ApiError('aborted');
   if (navigator.onLine === false) throw new ApiError('offline');
   const controller = new AbortController();
@@ -128,6 +128,7 @@ export async function searchPlaces(query, lang, { countries = [] } = {}) {
     format: 'jsonv2',
     limit: '5',
     addressdetails: '1',
+    extratags: '1',
     'accept-language': lang
   });
   if (codes) params.set('countrycodes', codes);
@@ -155,10 +156,16 @@ function normalizeSearchResult(item) {
     kind: String(item.addresstype || item.type || ''),
     importance: Number(item.importance) || 0,
     country: countryCode(item.address),
+    wikidata: wikidataId(item.extratags),
     bounds: box && box.every(Number.isFinite)
       ? { south: box[0], north: box[1], west: box[2], east: box[3] }
       : null
   };
+}
+
+function wikidataId(tags) {
+  const value = tags && typeof tags.wikidata === 'string' ? tags.wikidata.trim() : '';
+  return /^Q\d+$/.test(value) ? value : null;
 }
 
 function countryCode(address) {
@@ -266,7 +273,7 @@ async function overpassAttempt(index, query, timeout, signal) {
   return Array.isArray(data.elements) ? data.elements : [];
 }
 
-async function queryOverpass(query, signal, onWait, { patient = true, timeout = null, single = false } = {}) {
+export async function queryOverpass(query, signal, onWait, { patient = true, timeout = null, single = false } = {}) {
   let lastError = null;
   let allBusy = true;
   const all = [preferredEndpoint, ...OVERPASS_URLS.keys()].filter((index, position, list) => list.indexOf(index) === position);
@@ -397,7 +404,7 @@ export async function fetchCategories(categories, bounds, { signal = null, onWai
   return result;
 }
 
-function coordinates(element) {
+export function coordinates(element) {
   const lat = element.lat ?? element.center?.lat;
   const lon = element.lon ?? element.center?.lon;
   return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
@@ -485,7 +492,7 @@ function descriptions(tags) {
   return Object.keys(result).length ? result : null;
 }
 
-function photoSource(tags) {
+export function photoSource(tags) {
   const commons = cleanText(tags.wikimedia_commons);
   if (/^File:/i.test(commons)) return { kind: 'commons', value: commons };
   const image = cleanText(tags.image);
@@ -547,7 +554,7 @@ export async function fetchPhoto(source) {
   return photo;
 }
 
-function cleanText(value) {
+export function cleanText(value) {
   return typeof value === 'string' ? value.trim().slice(0, 300) : '';
 }
 
@@ -763,12 +770,13 @@ export async function reverseGeocode(lat, lon, lang) {
   const key = `${lang}|${lat.toFixed(2)},${lon.toFixed(2)}`;
   if (reverseCache.has(key)) return reverseCache.get(key);
   await nominatimTurn();
-  const params = new URLSearchParams({ lat: lat.toFixed(5), lon: lon.toFixed(5), format: 'jsonv2', zoom: '10', 'accept-language': lang });
+  const params = new URLSearchParams({ lat: lat.toFixed(5), lon: lon.toFixed(5), format: 'jsonv2', zoom: '10', extratags: '1', 'accept-language': lang });
   const data = await request(`${REVERSE_URL}?${params}`, { headers: { Accept: 'application/json' } }, 10000);
   const address = (data && data.address) || {};
   const place = {
     name: cleanText(address.city || address.town || address.village || address.municipality || address.county || data.name || '') || null,
-    country: countryCode(address)
+    country: countryCode(address),
+    wikidata: wikidataId(data && data.extratags)
   };
   reverseCache.set(key, place);
   return place;

@@ -1,4 +1,4 @@
-const VERSION = 'viaro-v1';
+const VERSION = 'viaro-v2';
 const SHELL = [
   './',
   'index.html',
@@ -6,7 +6,9 @@ const SHELL = [
   'css/style.css',
   'js/app.js',
   'js/api.js',
+  'js/discover.js',
   'js/i18n.js',
+  'js/info.js',
   'js/map.js',
   'js/overview.js',
   'js/planner.js',

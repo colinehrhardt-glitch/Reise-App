@@ -38,6 +38,27 @@ export const ICONS = {
   route: '<path d="M4 11.5 20 4l-7.5 16-1.8-6.7z"/>',
   close: '<path d="M7 7l10 10M17 7 7 17"/>',
   place: '<path d="M12 21s-6.5-6-6.5-11.5a6.5 6.5 0 0 1 13 0C18.5 15 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.3"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.2"/>',
+  shield: '<path d="M12 3.5 19 6v5.5c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6z"/>',
+  flag: '<path d="M5.5 21V4M5.5 4.5h11l-2 4 2 4h-11"/>',
+  book: '<path d="M4.5 5.5A2 2 0 0 1 6.5 4H19v14H6.5a2 2 0 0 0-2 2z"/><path d="M4.5 20V5.5M8.5 8h7"/>',
+  sights: '<path d="m12 3.8 2.5 5.2 5.7.8-4.1 4 1 5.6L12 16.7l-5.1 2.7 1-5.6-4.1-4 5.7-.8z"/>',
+  'sight-attraction': '<path d="m12 3.8 2.5 5.2 5.7.8-4.1 4 1 5.6L12 16.7l-5.1 2.7 1-5.6-4.1-4 5.7-.8z"/>',
+  'sight-museum': '<path d="M3.5 9 12 4l8.5 5"/><path d="M5.5 10v8M9.8 10v8M14.2 10v8M18.5 10v8M3.5 19.5h17"/>',
+  'sight-history': '<path d="M5 20.5V9h2.5V6.5h2V9h5V6.5h2V9H19v11.5z"/><path d="M10 20.5v-4h4v4"/>',
+  'sight-religion': '<path d="M12 3v4M10 5h4"/><path d="M7 20.5V12l5-4 5 4v8.5z"/><path d="M10.5 20.5v-4h3v4"/>',
+  'sight-nature': '<path d="M12 21v-5"/><path d="M12 3.5 6.5 11h3L6 16h12l-3.5-5h3z"/>',
+  'sight-beach': '<path d="M4 20.5c2.7-1.3 5.3-1.3 8 0s5.3 1.3 8 0"/><path d="M12.5 17 9.5 6.5"/><path d="M4.5 9.5C5.5 5 11 3 15.5 5.5c-2.6.3-4.6 1-6 2.5-1.6-.8-3.3-.6-5 1.5z"/>',
+  'sight-viewpoint': '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  'sight-fun': '<circle cx="12" cy="10" r="6.5"/><path d="M12 3.5v13M5.5 10h13M9 20.5l3-4 3 4"/>',
+  'w-sun': '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  'w-moon': '<path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/>',
+  'w-partly': '<path d="M8 3.8V5M3.3 9.3h1.2M4.7 5.7l.9.9M11.3 5.7l-.9.9"/><path d="M5.4 12.3A3.6 3.6 0 1 1 11.6 8.6"/><path d="M8.5 19.5h9a3.5 3.5 0 0 0 .3-7 5 5 0 0 0-9.6 1.2 2.9 2.9 0 0 0 .3 5.8z"/>',
+  'w-cloud': '<path d="M7 18.5h10.5a4 4 0 0 0 .4-8 6 6 0 0 0-11.5 1.6A3.3 3.3 0 0 0 7 18.5z"/>',
+  'w-fog': '<path d="M7 13.5h10.5a3.5 3.5 0 0 0 .3-7 5.5 5.5 0 0 0-10.5 1.4A3 3 0 0 0 7 13.5z"/><path d="M4 17h16M6 20.5h12"/>',
+  'w-rain': '<path d="M7 14.5h10.5a3.5 3.5 0 0 0 .3-7 5.5 5.5 0 0 0-10.5 1.4A3 3 0 0 0 7 14.5z"/><path d="M8 17.5 7 20M12 17.5 11 20M16 17.5 15 20"/>',
+  'w-snow': '<path d="M7 14.5h10.5a3.5 3.5 0 0 0 .3-7 5.5 5.5 0 0 0-10.5 1.4A3 3 0 0 0 7 14.5z"/><path d="M8 18h.01M12 20h.01M16 18h.01M10 21.5h.01M14 21.5h.01"/>',
+  'w-storm': '<path d="M7 14.5h10.5a3.5 3.5 0 0 0 .3-7 5.5 5.5 0 0 0-10.5 1.4A3 3 0 0 0 7 14.5z"/><path d="m12.5 15-2 3.5h3l-2 3.5"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
 };
 
@@ -54,7 +75,8 @@ export const LAYERS = {
   shopping: { color: '#7048e8' },
   health: { color: '#e03131' },
   food: { color: '#f59f00' },
-  transport: { color: '#8a5a2b' }
+  transport: { color: '#8a5a2b' },
+  sights: { color: '#d6336c' }
 };
 
 export const FAVORITE_COLOR = '#e64980';
@@ -507,7 +529,7 @@ export function renderPoiLayer(category, items, visible) {
 export function openPopup(item, content) {
   const size = map.getSize();
   const options = {
-    offset: [0, item.kind === 'poi' ? POI_OFFSET : PIN_OFFSET],
+    offset: [0, item.kind === 'accommodation' ? PIN_OFFSET : POI_OFFSET],
     maxWidth: 320,
     minWidth: 220,
     maxHeight: Math.max(240, size.y - insets.top - insets.bottom - 70),
