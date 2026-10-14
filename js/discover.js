@@ -1,12 +1,13 @@
 import { t, tCount, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
 import { reverseGeocode } from './api.js';
-import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchTravelWarning, fetchGuide, fetchSights, SIGHT_TYPES } from './info.js';
-import { el, icon, link, distance, errorMessage, formatNumber } from './ui.js';
+import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchAdvisories, fetchEmergency, fetchGuide, fetchSights, countryName, SIGHT_TYPES } from './info.js';
+import { el, icon, link, distance, errorMessage, formatNumber, gallery } from './ui.js';
 
 const CARDS = ['summary', 'weather', 'sights', 'country', 'safety', 'tips'];
 const CARD_ICONS = { summary: 'info', weather: 'w-partly', sights: 'sights', country: 'flag', safety: 'shield', tips: 'book' };
 const TIP_KEYS = ['around', 'eat', 'drink', 'respect', 'health'];
+const TIP_ICONS = { around: 'bus', eat: 'food', drink: 'w-moon', respect: 'info', health: 'health' };
 const SIGHT_PAGE = 20;
 const FORECAST_DAYS = 7;
 
@@ -131,29 +132,32 @@ async function resolvePlace(place) {
 }
 
 const LOADERS = {
-  summary: async (place, lang) => {
-    const country = place.country ? await fetchCountry(place.country).catch(() => null) : null;
-    return fetchSummary({ ...place, countryName: country ? country.names[lang] : null }, lang);
-  },
+  summary: async (place, lang) => fetchSummary({ ...place, countryName: countryName(place.country, lang) }, lang),
   weather: async (place) => fetchForecast(place.lat, place.lon),
-  country: async (place) => {
+  country: async (place, lang) => {
     if (!place.country) return null;
-    const [country, rates] = await Promise.all([fetchCountry(place.country), fetchRates().catch(() => null)]);
+    const [country, rates] = await Promise.all([fetchCountry(place.country, lang), fetchRates().catch(() => null)]);
     return { country, rates };
   },
   safety: async (place, lang) => {
-    const country = place.country ? await fetchCountry(place.country).catch(() => null) : null;
-    const [advice, guide] = await Promise.all([
-      place.country ? fetchTravelWarning(place.country).then((value) => ({ status: 'ok', value }), (error) => ({ status: 'error', error })) : { status: 'none' },
-      fetchGuide(place, lang, country ? country.names[lang] : null).catch(() => null)
+    const [advisories, emergency, guide] = await Promise.all([
+      place.country ? fetchAdvisories(place.country) : [],
+      place.country ? fetchEmergency(place.country).catch(() => null) : null,
+      fetchGuide(place, lang, place.country).catch(() => null)
     ]);
-    return { country, advice, guide };
+    return { advisories, emergency, guide, country: place.country };
   },
-  tips: async (place, lang) => {
-    const country = place.country ? await fetchCountry(place.country).catch(() => null) : null;
-    return fetchGuide(place, lang, country ? country.names[lang] : null);
-  },
-  sights: async (place, lang) => fetchSights(place, lang, sightRadius(place))
+  tips: async (place, lang) => fetchGuide(place, lang, place.country),
+  sights: async (place, lang, initial) => fetchSights(place, lang, sightRadius(place), {
+    onPartial: (items) => {
+      if (!state.place || placeKey(state.place) !== placeKey(initial) || getLanguage() !== lang) return;
+      const existing = resultFor('sights');
+      if (existing && existing.status === 'ok' && !existing.partial) return;
+      setResult('sights', initial, lang, { status: 'ok', data: items, partial: true });
+      renderCard('sights');
+      if (options.onSights) options.onSights(items);
+    }
+  })
 };
 
 function sightRadius(place) {
@@ -172,7 +176,7 @@ async function loadCard(card, force = false) {
   renderCard(card);
   try {
     const place = await resolvePlace(initial);
-    const data = await LOADERS[card](place, lang);
+    const data = await LOADERS[card](place, lang, initial);
     setResult(card, initial, lang, { status: 'ok', data });
     if (state.place && placeKey(state.place) === placeKey(initial)) {
       if (card === 'sights' && options.onSights) options.onSights(data || []);
@@ -184,6 +188,7 @@ async function loadCard(card, force = false) {
   if (state.place && placeKey(state.place) === placeKey(initial) && getLanguage() === lang) {
     renderCard(card);
     if (card === 'weather') renderCard('country');
+    if (card === 'weather' || card === 'country') renderCard('summary');
   }
 }
 
@@ -245,12 +250,44 @@ function sourceLine(label, href) {
   return el('p', { class: 'discover__source' }, link(href, label, 'discover__link'), icon('external'));
 }
 
+function glanceItems() {
+  const items = [];
+  const weather = resultValue('weather');
+  if (weather && weather.current && Number.isFinite(weather.current.temp)) {
+    const info = weatherInfo(weather.current.code, weather.current.day);
+    items.push([info.icon, `${temp(weather.current.temp)} · ${info.label}`]);
+  }
+  if (weather && weather.timezone) {
+    const time = localTime(weather.timezone);
+    if (time) items.push(['clock', time]);
+  }
+  const data = resultValue('country');
+  if (data && data.country) {
+    const main = data.country.currencies[0];
+    const rate = main && data.rates && data.rates.rates ? data.rates.rates[main.code] : null;
+    if (main && main.code !== 'EUR' && rate) items.push(['money', `1 € = ${money(rate, main.code)}`]);
+    if (data.country.languages[0]) items.push(['globe', languageName(data.country.languages[0].code, data.country.languages[0].name)]);
+  }
+  return items;
+}
+
+function sourceNote(label, href, translatedText = false) {
+  return el('p', { class: 'discover__source discover__source--small' },
+    el('span', { text: translatedText ? t('discover.translatedFrom', { source: label }) : t('discover.sourceLabel', { source: label }) }),
+    href ? link(href, t('discover.open'), 'discover__link') : null);
+}
+
 function renderSummary(data) {
-  if (!data) return empty(t('discover.noSummary'));
+  const glance = glanceItems();
+  const chips = glance.length ? el('ul', { class: 'glance' }, glance.map(([name, text]) => el('li', { class: 'glance__item' }, icon(name), el('span', { text })))) : null;
+  if (!data) return el('div', { class: 'summary' }, chips, empty(t('discover.noSummary')));
   return el('div', { class: 'summary' },
-    data.image ? el('img', { class: 'summary__image', src: data.image, alt: '', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' }) : null,
-    el('p', { class: 'summary__text', text: data.extract }),
-    data.url ? sourceLine(t('discover.readWikipedia'), data.url) : null);
+    data.images && data.images.length ? gallery(data.images) : null,
+    data.description ? el('p', { class: 'summary__lead', text: data.description }) : null,
+    el('p', { class: 'summary__text', text: data.text }),
+    chips,
+    data.foreign ? el('p', { class: 'discover__note', text: t('discover.onlyEnglish') }) : null,
+    sourceNote('Wikipedia', data.url, data.translated));
 }
 
 const WEATHER_GROUPS = [
@@ -450,55 +487,66 @@ function renderCountry(data) {
     sourceLine('REST Countries', 'https://restcountries.com/'));
 }
 
-function adviceLinks(country) {
-  const lang = getLanguage();
-  const links = [['Auswärtiges Amt', 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise']];
-  if (lang === 'en' && country) links.push(['GOV.UK', `https://www.gov.uk/foreign-travel-advice/${encodeURIComponent(country.names.en.toLowerCase().replace(/[^a-z]+/g, '-').replace(/^-|-$/g, ''))}`]);
-  if (lang === 'es') links.push(['Ministerio de Asuntos Exteriores', 'https://www.exteriores.gob.es/es/ServiciosAlCiudadano/Paginas/Recomendaciones-de-viaje.aspx']);
-  return el('div', { class: 'discover__links' }, links.map(([label, href]) => el('a', { class: 'btn btn--secondary btn--small', href, target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: label }), icon('external'))));
+const LEVEL_KEYS = ['', 'low', 'medium', 'high', 'severe'];
+
+function levelDots(level) {
+  return el('span', { class: `level-dots level-dots--${LEVEL_KEYS[level]}`, 'aria-hidden': 'true' }, [1, 2, 3, 4].map((step) => el('span', { class: step <= level ? 'is-on' : null })));
 }
 
-function adviceBadge(advice) {
-  if (advice.status === 'none') return null;
-  if (advice.status === 'error' || !advice.value) {
-    return el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') });
-  }
-  const value = advice.value;
-  const level = value.warning ? 'warning' : value.partial ? 'partial' : value.situation || value.situationPart ? 'situation' : 'none';
-  return el('div', { class: `advice advice--${level}` },
-    icon(level === 'none' ? 'check' : 'alert'),
-    el('span', { class: 'advice__text' },
-      el('strong', { text: t(`safety.level.${level}`) }),
-      el('span', { text: value.modified ? t('safety.updated', { date: new Intl.DateTimeFormat(getLanguage(), { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(value.modified)) }) : t('safety.source') })));
+function safetyGauge(advisories) {
+  const average = advisories.reduce((sum, item) => sum + item.level, 0) / advisories.length;
+  const level = Math.min(4, Math.max(1, Math.round(average)));
+  const position = ((average - 1) / 3) * 100;
+  return el('div', { class: `gauge gauge--${LEVEL_KEYS[level]}` },
+    el('div', { class: 'gauge__head' },
+      el('span', { class: 'gauge__label', text: t(`safety.overall.${LEVEL_KEYS[level]}`) }),
+      el('span', { class: 'gauge__value', text: t('safety.scale', { value: formatNumber(Math.round(average * 10) / 10) }) })),
+    el('div', { class: 'gauge__bar', role: 'img', 'aria-label': t(`safety.overall.${LEVEL_KEYS[level]}`) },
+      [1, 2, 3, 4].map((step) => el('span', { class: `gauge__segment gauge__segment--${LEVEL_KEYS[step]}` })),
+      el('span', { class: 'gauge__marker', style: `left:${position}%` })),
+    el('div', { class: 'gauge__ticks', 'aria-hidden': 'true' }, [1, 2, 3, 4].map((step) => el('span', { text: t(`safety.tick.${LEVEL_KEYS[step]}`) }))));
 }
 
-function guideText(section) {
-  return el('div', { class: 'guide-text' },
-    section.text.split('\n').map((line) => el('p', { class: line.startsWith('• ') ? 'guide-text__item' : null, text: line })),
-    el('p', { class: 'discover__source' }, link(section.url, t('discover.readMore', { source: section.source }), 'discover__link'), icon('external')));
+function advisoryRow(item) {
+  return el('li', { class: 'advisory' },
+    el('span', { class: 'advisory__source', text: t(`safety.source.${item.id}`) }),
+    levelDots(item.level),
+    el('a', { class: 'advisory__text', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t(`safety.levelText.${item.id}.${item.level}`) }), icon('external')));
+}
+
+function pointList(points, className = 'points') {
+  return el('ul', { class: className }, points.map((point) => el('li', {
+    text: typeof point === 'string' ? point : t('tips.recommended', { names: point.names.join(', ') })
+  })));
 }
 
 function renderSafety(data) {
   if (!data) return empty(t('safety.none'));
   const section = data.guide && data.guide.sections.safety;
+  const advisories = data.advisories || [];
   return el('div', { class: 'safety' },
-    adviceBadge(data.advice),
-    adviceLinks(data.country),
-    section ? el('p', { class: 'discover__subtitle', text: t('safety.fromGuide') }) : null,
-    section ? guideText(section) : el('p', { class: 'discover__note', text: t('safety.noGuide') }));
+    advisories.length ? safetyGauge(advisories) : null,
+    advisories.length ? el('ul', { class: 'advisories' }, advisories.map(advisoryRow)) : el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
+    advisories.length ? el('p', { class: 'discover__note', text: t('safety.countryWide') }) : null,
+    data.emergency && data.emergency.length ? el('div', { class: 'emergency' },
+      icon('phone'),
+      el('span', { class: 'emergency__label', text: t('safety.emergency') }),
+      data.emergency.map((number) => el('a', { class: 'emergency__number', href: `tel:${number.replace(/[^\d+]/g, '')}`, text: number }))) : null,
+    section ? el('p', { class: 'discover__subtitle', text: t('safety.inShort') }) : null,
+    section ? pointList(section.points) : null,
+    section ? sourceNote(`Wikivoyage (${section.source})`, section.url, section.translated) : null,
+    advisories.length ? null : el('div', { class: 'discover__links' }, el('a', { class: 'btn btn--secondary btn--small', href: 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise', target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t('safety.source.de') }), icon('external'))));
 }
 
 function renderTips(data) {
   const sections = data ? TIP_KEYS.filter((key) => data.sections[key]) : [];
   if (!sections.length) return empty(t('tips.none'));
+  const translatedAny = sections.some((key) => data.sections[key].translated);
   return el('div', { class: 'tips' },
-    sections.map((key) => {
-      const details = el('details', { class: 'tip' },
-        el('summary', { class: 'tip__head' }, el('span', { text: t(`tips.${key}`) }), icon('chevron')),
-        guideText(data.sections[key]));
-      return details;
-    }),
-    data.url ? sourceLine(t('tips.openGuide', { title: data.title }), data.url) : null);
+    sections.map((key) => el('section', { class: 'tip' },
+      el('p', { class: 'tip__head' }, el('span', { class: 'tip__icon', 'aria-hidden': 'true' }, icon(TIP_ICONS[key])), el('span', { text: t(`tips.${key}`) })),
+      pointList(data.sections[key].points))),
+    sourceNote(`Wikivoyage (${data.title})`, data.url, translatedAny));
 }
 
 function sightRow(item, index) {
@@ -557,6 +605,7 @@ function renderSights(items) {
         renderCard('sights');
       }
     }, el('span', { text: t('sights.more', { n: visible.length - shown.length }) })) : null,
+    resultFor('sights') && resultFor('sights').partial ? el('p', { class: 'discover__loading discover__loading--inline' }, el('span', { class: 'spinner' }), el('span', { text: t('sights.loadingMore') })) : null,
     el('p', { class: 'discover__note', text: t('sights.source') }));
 }
 

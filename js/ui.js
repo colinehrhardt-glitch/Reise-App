@@ -78,3 +78,52 @@ export function toast(message, { type = 'info', action = null, duration = 4000 }
   while (container.children.length > 3) container.firstElementChild.remove();
   timer = setTimeout(dismiss, duration);
 }
+
+export function gallery(images) {
+  const list = images.filter((image) => image && image.src);
+  const slides = list.map((image, index) => {
+    const img = el('img', { src: image.src, alt: '', loading: index ? 'lazy' : 'eager', decoding: 'async', referrerpolicy: 'no-referrer' });
+    const slide = el('figure', { class: 'gallery__slide' }, img);
+    img.addEventListener('error', () => {
+      slide.remove();
+      update();
+    });
+    return { slide, image };
+  });
+  const track = el('div', { class: 'gallery__track' }, slides.map((item) => item.slide));
+  const dots = el('div', { class: 'gallery__dots', 'aria-hidden': 'true' });
+  const counter = el('span', { class: 'gallery__count' });
+  const credit = el('a', { class: 'gallery__credit', target: '_blank', rel: 'noopener noreferrer' });
+  const prev = el('button', { type: 'button', class: 'gallery__nav gallery__nav--prev', 'aria-label': t('gallery.prev'), onclick: () => step(-1) }, icon('chevron'));
+  const next = el('button', { type: 'button', class: 'gallery__nav gallery__nav--next', 'aria-label': t('gallery.next'), onclick: () => step(1) }, icon('chevron'));
+  const root = el('div', { class: 'gallery' }, track, prev, next, counter, dots, credit);
+  const live = () => slides.filter((item) => item.slide.parentNode === track);
+  const index = () => Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+  function step(direction) {
+    track.scrollTo({ left: (index() + direction) * track.clientWidth, behavior: 'smooth' });
+  }
+  function update() {
+    const items = live();
+    if (!items.length) {
+      root.remove();
+      return;
+    }
+    const current = Math.min(items.length - 1, Math.max(0, index()));
+    const many = items.length > 1;
+    root.classList.toggle('is-single', !many);
+    counter.textContent = many ? `${current + 1}/${items.length}` : '';
+    dots.replaceChildren(...(many ? items.map((_, position) => el('span', { class: position === current ? 'is-active' : null })) : []));
+    prev.disabled = current === 0;
+    next.disabled = current === items.length - 1;
+    const image = items[current].image;
+    credit.href = image.link || image.src;
+    credit.textContent = t('photo.credit', { source: image.credit || 'Wikimedia Commons' });
+  }
+  let frame = 0;
+  track.addEventListener('scroll', () => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(update);
+  }, { passive: true });
+  update();
+  return root;
+}

@@ -2,7 +2,7 @@ import { t, tCount, getLanguage, setLanguage, onLanguageChange, applyTranslation
 import { load, save } from './storage.js';
 import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
-import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
+import { el, icon, link, formatNumber, distance, errorMessage, toast, gallery } from './ui.js';
 import { getRecent, addRecent, clearRecent } from './recent.js';
 import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, retryFailed, stayTargetFor, stayStatus, toggleStay, stayDatesFor, routePlaces, sightTargetFor, sightStatus, toggleSight } from './planner.js';
 import { initDiscover, renderDiscover, activateDiscover, setDiscoverPlace, discoverTitle, discoverSubtitle, refreshSights, currentStopId } from './discover.js';
@@ -245,7 +245,7 @@ function renderSources() {
     el('dt', { text: t('about.weather') }),
     el('dd', {}, link('https://open-meteo.com', 'Open-Meteo'), ' (CC BY 4.0)'),
     el('dt', { text: t('about.countries') }),
-    el('dd', {}, link('https://restcountries.com', 'REST Countries'), ', ', link('https://www.exchangerate-api.com', 'ExchangeRate-API'), ', ', link('https://www.auswaertiges-amt.de', 'Auswärtiges Amt')),
+    el('dd', {}, link('https://restcountries.com', 'REST Countries'), ', ', link('https://www.exchangerate-api.com', 'ExchangeRate-API'), ', ', link('https://www.auswaertiges-amt.de', 'Auswärtiges Amt'), ', ', link('https://www.gov.uk/foreign-travel-advice', 'GOV.UK'), ', ', link('https://travel.state.gov', 'U.S. State Department'), ', ', link('https://mymemory.translated.net', 'MyMemory')),
     el('dt', { text: t('about.contact') }),
     el('dd', {}, link('https://github.com/colinehrhardt-glitch/Reise-App', 'GitHub')),
     el('dt', { text: t('about.photos') }),
@@ -843,21 +843,14 @@ function sightSaveButton(item) {
 }
 
 function sightPhoto(item) {
-  if (!item.image && !item.photo) return null;
-  const figure = el('figure', { class: 'popup__photo is-loading' });
-  if (item.image) {
-    const img = el('img', { alt: '', decoding: 'async', referrerpolicy: 'no-referrer' });
-    img.addEventListener('load', () => figure.classList.remove('is-loading'));
-    img.addEventListener('error', () => {
-      figure.remove();
-      mapView.refreshPopup();
-    });
-    img.src = item.image;
-    figure.append(img, el('figcaption', { class: 'popup__credit', text: t('photo.credit', { source: 'Wikimedia Commons' }) }));
-  } else {
+  const holder = el('div', { class: 'popup__gallery' });
+  if (item.image) holder.append(gallery([{ src: item.image, link: item.image, credit: 'Wikimedia Commons' }]));
+  else if (item.photo) {
+    const figure = el('figure', { class: 'popup__photo is-loading' });
+    holder.append(figure);
     loadPhoto(item, figure);
   }
-  return figure;
+  return holder;
 }
 
 function sightContent(item) {
@@ -866,14 +859,18 @@ function sightContent(item) {
   const description = el('p', { class: 'popup__desc is-loading', text: t('sights.loadingText') });
   const wiki = el('div', { class: 'popup__wiki' });
   const lang = getLanguage();
+  const photos = sightPhoto(item);
   if (item.wikidata || item.wikiTitle) {
     fetchSightSummary(item, lang).then((summary) => {
       if (!summary) {
         description.remove();
       } else {
         description.classList.remove('is-loading');
-        description.textContent = summary.extract;
-        if (summary.url) wiki.replaceChildren(link(summary.url, t('discover.readWikipedia'), 'discover__link'), icon('external'));
+        description.textContent = summary.text;
+        if (summary.url) wiki.replaceChildren(el('span', { text: t(summary.translated ? 'discover.translatedFrom' : 'discover.sourceLabel', { source: 'Wikipedia' }) }), link(summary.url, t('discover.open'), 'discover__link'));
+        const images = [item.image ? { src: item.image, link: item.image, credit: 'Wikimedia Commons' } : null, ...(summary.images || [])].filter(Boolean)
+          .filter((image, index, all) => all.findIndex((other) => other.src.split('?')[0] === image.src.split('?')[0]) === index);
+        if (images.length > (item.image ? 1 : 0)) photos.replaceChildren(gallery(images));
       }
       mapView.refreshPopup();
     }).catch(() => {
@@ -887,7 +884,7 @@ function sightContent(item) {
   if (item.fee === 'no') facts.push(t('sights.free'));
   if (item.fee === 'yes') facts.push(t('sights.fee'));
   return el('div', { class: 'popup' },
-    sightPhoto(item),
+    photos,
     el('div', { class: 'popup__body' },
       el('div', { class: 'popup__head' },
         el('span', { class: 'type-badge', style: `--c:${color}` }, dot(color, `sight-${item.type}`), el('span', { text: typeText })),

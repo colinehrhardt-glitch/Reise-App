@@ -1,4 +1,4 @@
-const VERSION = 'viaro-v2';
+const VERSION = 'viaro-v3';
 const SHELL = [
   './',
   'index.html',
