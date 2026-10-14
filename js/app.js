@@ -844,7 +844,7 @@ function sightSaveButton(item) {
 
 function sightPhoto(item) {
   const holder = el('div', { class: 'popup__gallery' });
-  if (item.image) holder.append(gallery([{ src: item.image, link: item.image, credit: 'Wikimedia Commons' }]));
+  if (item.image) holder.append(gallery([{ src: item.image, link: item.image, credit: 'Wikimedia Commons', label: item.name }]));
   else if (item.photo) {
     const figure = el('figure', { class: 'popup__photo is-loading' });
     holder.append(figure);
@@ -857,7 +857,6 @@ function sightContent(item) {
   const color = mapView.LAYERS.sights.color;
   const typeText = t(`sights.type.${item.type}`);
   const description = el('p', { class: 'popup__desc is-loading', text: t('sights.loadingText') });
-  const wiki = el('div', { class: 'popup__wiki' });
   const lang = getLanguage();
   const photos = sightPhoto(item);
   if (item.wikidata || item.wikiTitle) {
@@ -867,8 +866,7 @@ function sightContent(item) {
       } else {
         description.classList.remove('is-loading');
         description.textContent = summary.text;
-        if (summary.url) wiki.replaceChildren(el('span', { text: t(summary.translated ? 'discover.translatedFrom' : 'discover.sourceLabel', { source: 'Wikipedia' }) }), link(summary.url, t('discover.open'), 'discover__link'));
-        const images = [item.image ? { src: item.image, link: item.image, credit: 'Wikimedia Commons' } : null, ...(summary.images || [])].filter(Boolean)
+        const images = [item.image ? { src: item.image, link: item.image, credit: 'Wikimedia Commons', label: item.name } : null, ...(summary.images || [])].filter(Boolean)
           .filter((image, index, all) => all.findIndex((other) => other.src.split('?')[0] === image.src.split('?')[0]) === index);
         if (images.length > (item.image ? 1 : 0)) photos.replaceChildren(gallery(images));
       }
@@ -892,7 +890,6 @@ function sightContent(item) {
       el('h3', { class: 'popup__title', text: item.name }),
       factChips(facts),
       description,
-      wiki,
       contactRows(item),
       sightSaveButton(item) || addToRouteButton(item),
       routeButton(item)));

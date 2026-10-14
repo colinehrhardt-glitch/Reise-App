@@ -386,11 +386,38 @@ async function germanAdvice(code) {
   return { id: 'de', level, url: 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise', updated: value.modified };
 }
 
+const ADVICE_URLS = {
+  de: () => 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise',
+  uk: (slug) => `https://www.gov.uk/foreign-travel-advice/${slug}`,
+  us: () => 'https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html'
+};
+let adviceFile = null;
+
+async function bundledAdvice(id) {
+  if (!adviceFile) {
+    adviceFile = fetch('data/advisories.json', { cache: 'no-cache' }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
+  }
+  const data = await adviceFile;
+  const entry = data && data.countries ? data.countries[id] : null;
+  if (!entry) return [];
+  const list = [];
+  for (const source of ['de', 'uk', 'us']) {
+    const value = entry[source];
+    if (value === undefined) continue;
+    const [level, slug] = Array.isArray(value) ? value : [value, null];
+    if (Number.isInteger(level) && level >= 1 && level <= 4) list.push({ id: source, level, url: ADVICE_URLS[source](slug || ''), updated: Date.parse(data.updated) || null });
+  }
+  return list;
+}
+
 export async function fetchAdvisories(code) {
   const id = String(code || '').toLowerCase();
   if (!/^[a-z]{2}$/.test(id)) return [];
+  const bundled = await bundledAdvice(id);
+  if (bundled.length >= 2) return bundled;
   const results = await Promise.allSettled([germanAdvice(id), ukAdvice(id), usAdvice(id)]);
-  return results.filter((result) => result.status === 'fulfilled' && result.value).map((result) => result.value);
+  const live = results.filter((result) => result.status === 'fulfilled' && result.value).map((result) => result.value);
+  return ['de', 'uk', 'us'].map((source) => live.find((item) => item.id === source) || bundled.find((item) => item.id === source)).filter(Boolean);
 }
 
 const GUIDE_SECTIONS = {

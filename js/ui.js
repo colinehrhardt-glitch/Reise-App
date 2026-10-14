@@ -79,51 +79,54 @@ export function toast(message, { type = 'info', action = null, duration = 4000 }
   timer = setTimeout(dismiss, duration);
 }
 
+function largeSrc(src) {
+  return /[?&]width=\d+/.test(src) ? src.replace(/([?&]width=)\d+/, '$11280') : src;
+}
+
+export function openLightbox(images, start = 0) {
+  const previous = document.activeElement;
+  const track = el('div', { class: 'lightbox__track' }, images.map((image) => el('figure', { class: 'lightbox__slide' },
+    el('img', { src: largeSrc(image.full || image.src), alt: image.label || '', decoding: 'async', referrerpolicy: 'no-referrer' }),
+    el('figcaption', { class: 'lightbox__caption' },
+      image.label ? el('span', { class: 'lightbox__label', text: image.label }) : null,
+      image.link ? el('a', { class: 'lightbox__credit', href: image.link, target: '_blank', rel: 'noopener noreferrer', text: t('photo.credit', { source: image.credit || 'Wikimedia Commons' }) }) : null))));
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    if (previous && previous.focus) previous.focus({ preventScroll: true });
+  };
+  const onKey = (event) => {
+    if (event.key === 'Escape') close();
+    if (event.key === 'ArrowRight') track.scrollBy({ left: track.clientWidth, behavior: 'smooth' });
+    if (event.key === 'ArrowLeft') track.scrollBy({ left: -track.clientWidth, behavior: 'smooth' });
+  };
+  const closeButton = el('button', { type: 'button', class: 'lightbox__close', 'aria-label': t('common.close'), onclick: close }, icon('close'));
+  const overlay = el('div', { class: 'lightbox', role: 'dialog', 'aria-modal': 'true' }, track, closeButton);
+  document.addEventListener('keydown', onKey);
+  document.body.append(overlay);
+  requestAnimationFrame(() => {
+    track.scrollLeft = start * track.clientWidth;
+    closeButton.focus({ preventScroll: true });
+  });
+}
+
 export function gallery(images) {
   const list = images.filter((image) => image && image.src);
   const slides = list.map((image, index) => {
-    const img = el('img', { src: image.src, alt: '', loading: index ? 'lazy' : 'eager', decoding: 'async', referrerpolicy: 'no-referrer' });
-    const slide = el('figure', { class: 'gallery__slide' }, img);
+    const img = el('img', { src: image.src, alt: image.label || '', loading: index > 2 ? 'lazy' : 'eager', decoding: 'async', referrerpolicy: 'no-referrer' });
+    const slide = el('button', { type: 'button', class: 'gallery__slide', 'aria-label': image.label || t('gallery.open') }, img,
+      image.label ? el('span', { class: 'gallery__label', text: image.label }) : null);
+    slide.addEventListener('click', () => {
+      const live = slides.filter((item) => item.slide.parentNode === track);
+      openLightbox(live.map((item) => item.image), Math.max(0, live.findIndex((item) => item.slide === slide)));
+    });
     img.addEventListener('error', () => {
       slide.remove();
-      update();
+      if (!track.children.length) root.remove();
     });
     return { slide, image };
   });
   const track = el('div', { class: 'gallery__track' }, slides.map((item) => item.slide));
-  const dots = el('div', { class: 'gallery__dots', 'aria-hidden': 'true' });
-  const counter = el('span', { class: 'gallery__count' });
-  const credit = el('a', { class: 'gallery__credit', target: '_blank', rel: 'noopener noreferrer' });
-  const prev = el('button', { type: 'button', class: 'gallery__nav gallery__nav--prev', 'aria-label': t('gallery.prev'), onclick: () => step(-1) }, icon('chevron'));
-  const next = el('button', { type: 'button', class: 'gallery__nav gallery__nav--next', 'aria-label': t('gallery.next'), onclick: () => step(1) }, icon('chevron'));
-  const root = el('div', { class: 'gallery' }, track, prev, next, counter, dots, credit);
-  const live = () => slides.filter((item) => item.slide.parentNode === track);
-  const index = () => Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
-  function step(direction) {
-    track.scrollTo({ left: (index() + direction) * track.clientWidth, behavior: 'smooth' });
-  }
-  function update() {
-    const items = live();
-    if (!items.length) {
-      root.remove();
-      return;
-    }
-    const current = Math.min(items.length - 1, Math.max(0, index()));
-    const many = items.length > 1;
-    root.classList.toggle('is-single', !many);
-    counter.textContent = many ? `${current + 1}/${items.length}` : '';
-    dots.replaceChildren(...(many ? items.map((_, position) => el('span', { class: position === current ? 'is-active' : null })) : []));
-    prev.disabled = current === 0;
-    next.disabled = current === items.length - 1;
-    const image = items[current].image;
-    credit.href = image.link || image.src;
-    credit.textContent = t('photo.credit', { source: image.credit || 'Wikimedia Commons' });
-  }
-  let frame = 0;
-  track.addEventListener('scroll', () => {
-    cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(update);
-  }, { passive: true });
-  update();
+  const root = el('div', { class: `gallery${list.length === 1 ? ' is-single' : ''}` }, track);
   return root;
 }

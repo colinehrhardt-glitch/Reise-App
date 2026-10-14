@@ -1,8 +1,8 @@
-import { t, tCount, getLanguage, formatDistance } from './i18n.js';
+import { t, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
 import { reverseGeocode } from './api.js';
 import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchAdvisories, fetchEmergency, fetchGuide, fetchSights, countryName, SIGHT_TYPES } from './info.js';
-import { el, icon, link, distance, errorMessage, formatNumber, gallery } from './ui.js';
+import { el, icon, distance, errorMessage, formatNumber, gallery } from './ui.js';
 
 const CARDS = ['summary', 'weather', 'sights', 'country', 'safety', 'tips'];
 const CARD_ICONS = { summary: 'info', weather: 'w-partly', sights: 'sights', country: 'flag', safety: 'shield', tips: 'book' };
@@ -18,6 +18,7 @@ const state = {
   sightFilter: 'all',
   sightLimit: SIGHT_PAGE,
   allDays: false,
+  tipTab: null,
   resolving: null
 };
 let options = {};
@@ -155,6 +156,7 @@ const LOADERS = {
       if (existing && existing.status === 'ok' && !existing.partial) return;
       setResult('sights', initial, lang, { status: 'ok', data: items, partial: true });
       renderCard('sights');
+      renderCard('summary');
       if (options.onSights) options.onSights(items);
     }
   })
@@ -188,13 +190,14 @@ async function loadCard(card, force = false) {
   if (state.place && placeKey(state.place) === placeKey(initial) && getLanguage() === lang) {
     renderCard(card);
     if (card === 'weather') renderCard('country');
-    if (card === 'weather' || card === 'country') renderCard('summary');
+    if (card === 'weather' || card === 'country' || card === 'sights') renderCard('summary');
   }
 }
 
 export function activateDiscover() {
   if (!state.place || !options.isActive || !options.isActive()) return;
   for (const card of CARDS) if (state.open[card]) loadCard(card);
+  if (!state.open.sights) loadCard('sights');
   if (!state.open.country && state.place.country) loadCard('country');
   const sights = resultValue('sights');
   if (sights && options.onSights) options.onSights(sights);
@@ -246,10 +249,6 @@ function empty(text) {
   return el('p', { class: 'discover__empty', text });
 }
 
-function sourceLine(label, href) {
-  return el('p', { class: 'discover__source' }, link(href, label, 'discover__link'), icon('external'));
-}
-
 function glanceItems() {
   const items = [];
   const weather = resultValue('weather');
@@ -271,23 +270,35 @@ function glanceItems() {
   return items;
 }
 
-function sourceNote(label, href, translatedText = false) {
-  return el('p', { class: 'discover__source discover__source--small' },
-    el('span', { text: translatedText ? t('discover.translatedFrom', { source: label }) : t('discover.sourceLabel', { source: label }) }),
-    href ? link(href, t('discover.open'), 'discover__link') : null);
+function cityImages(data) {
+  const images = [];
+  const seen = new Set();
+  const add = (image) => {
+    if (!image || !image.src) return;
+    const key = image.src.split('?')[0];
+    if (seen.has(key)) return;
+    seen.add(key);
+    images.push(image);
+  };
+  if (data && data.images && data.images[0]) add({ ...data.images[0], label: state.place.name });
+  const sights = resultValue('sights') || [];
+  for (const item of sights) {
+    if (images.length >= 10) break;
+    if (item.image) add({ src: item.image, label: item.name, link: item.image, credit: 'Wikimedia Commons' });
+  }
+  if (images.length < 3 && data && data.images) data.images.slice(1).forEach((image) => images.length < 6 && add(image));
+  return images;
 }
 
 function renderSummary(data) {
   const glance = glanceItems();
   const chips = glance.length ? el('ul', { class: 'glance' }, glance.map(([name, text]) => el('li', { class: 'glance__item' }, icon(name), el('span', { text })))) : null;
-  if (!data) return el('div', { class: 'summary' }, chips, empty(t('discover.noSummary')));
+  const images = cityImages(data);
+  if (!data) return el('div', { class: 'summary' }, images.length ? gallery(images) : null, chips, empty(t('discover.noSummary')));
   return el('div', { class: 'summary' },
-    data.images && data.images.length ? gallery(data.images) : null,
-    data.description ? el('p', { class: 'summary__lead', text: data.description }) : null,
+    images.length ? gallery(images) : null,
     el('p', { class: 'summary__text', text: data.text }),
-    chips,
-    data.foreign ? el('p', { class: 'discover__note', text: t('discover.onlyEnglish') }) : null,
-    sourceNote('Wikipedia', data.url, data.translated));
+    chips);
 }
 
 const WEATHER_GROUPS = [
@@ -345,7 +356,7 @@ function climateBlock(dates, forecast) {
       el('div', { class: 'climate__values' },
         el('span', { class: 'climate__temp', text: `${temp(data.max)} / ${temp(data.min)}` }),
         data.rain !== null ? el('span', { text: t('weather.climateRain', { mm: formatNumber(Math.round(data.rain * 10) / 10), share: Math.round(data.rainyShare * 100) }) }) : null),
-      el('p', { class: 'discover__note', text: tCount('weather.climateNote', data.years) }));
+      null);
   };
   if (cached) fill(cached);
   else {
@@ -409,9 +420,7 @@ function renderWeather(data) {
         renderCard('weather');
       }
     }) : null,
-    dates && data.days.some((day) => inStay(day.date)) ? el('p', { class: 'discover__note', text: t('weather.stayHint') }) : null,
-    climateBlock(dates, data),
-    sourceLine('Open-Meteo', 'https://open-meteo.com/'));
+    climateBlock(dates, data));
 }
 
 function infoRow(label, value) {
@@ -464,7 +473,7 @@ function rateBlock(currencies, rates) {
     el('ul', { class: 'rates__list' },
       amounts.map((amount) => el('li', { text: `${money(amount, 'EUR')} ≈ ${money(amount * rate, main.code)}` })),
       el('li', { text: `${money(local, main.code)} ≈ ${money(local / rate, 'EUR')}` })),
-    el('p', { class: 'discover__note', text: t('country.rateNote', { date: new Intl.DateTimeFormat(getLanguage(), { day: 'numeric', month: 'short' }).format(new Date(rates.time)) }) }));
+    null);
 }
 
 function renderCountry(data) {
@@ -483,8 +492,7 @@ function renderCountry(data) {
       infoRow(t('country.calling'), country.calling),
       infoRow(t('country.time'), time ? `${time} (${weather.timezone.replace(/_/g, ' ')})` : country.timezones.join(', ')),
       infoRow(t('country.driving'), t(country.side === 'left' ? 'country.left' : 'country.right'))),
-    rateBlock(country.currencies, rates),
-    sourceLine('REST Countries', 'https://restcountries.com/'));
+    rateBlock(country.currencies, rates));
 }
 
 const LEVEL_KEYS = ['', 'low', 'medium', 'high', 'severe'];
@@ -511,7 +519,7 @@ function advisoryRow(item) {
   return el('li', { class: 'advisory' },
     el('span', { class: 'advisory__source', text: t(`safety.source.${item.id}`) }),
     levelDots(item.level),
-    el('a', { class: 'advisory__text', href: item.url, target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t(`safety.levelText.${item.id}.${item.level}`) }), icon('external')));
+    el('a', { class: 'advisory__text', href: item.url, target: '_blank', rel: 'noopener noreferrer', text: t(`safety.levelText.${item.id}.${item.level}`) }));
 }
 
 function pointList(points, className = 'points') {
@@ -527,26 +535,31 @@ function renderSafety(data) {
   return el('div', { class: 'safety' },
     advisories.length ? safetyGauge(advisories) : null,
     advisories.length ? el('ul', { class: 'advisories' }, advisories.map(advisoryRow)) : el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
-    advisories.length ? el('p', { class: 'discover__note', text: t('safety.countryWide') }) : null,
     data.emergency && data.emergency.length ? el('div', { class: 'emergency' },
       icon('phone'),
       el('span', { class: 'emergency__label', text: t('safety.emergency') }),
       data.emergency.map((number) => el('a', { class: 'emergency__number', href: `tel:${number.replace(/[^\d+]/g, '')}`, text: number }))) : null,
     section ? el('p', { class: 'discover__subtitle', text: t('safety.inShort') }) : null,
     section ? pointList(section.points) : null,
-    section ? sourceNote(`Wikivoyage (${section.source})`, section.url, section.translated) : null,
     advisories.length ? null : el('div', { class: 'discover__links' }, el('a', { class: 'btn btn--secondary btn--small', href: 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise', target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t('safety.source.de') }), icon('external'))));
 }
 
 function renderTips(data) {
   const sections = data ? TIP_KEYS.filter((key) => data.sections[key]) : [];
   if (!sections.length) return empty(t('tips.none'));
-  const translatedAny = sections.some((key) => data.sections[key].translated);
+  const active = sections.includes(state.tipTab) ? state.tipTab : sections[0];
   return el('div', { class: 'tips' },
-    sections.map((key) => el('section', { class: 'tip' },
-      el('p', { class: 'tip__head' }, el('span', { class: 'tip__icon', 'aria-hidden': 'true' }, icon(TIP_ICONS[key])), el('span', { text: t(`tips.${key}`) })),
-      pointList(data.sections[key].points))),
-    sourceNote(`Wikivoyage (${data.title})`, data.url, translatedAny));
+    el('div', { class: 'tips__tabs', role: 'tablist', 'aria-label': t('discover.tips') }, sections.map((key) => el('button', {
+      type: 'button',
+      class: 'tips__tab',
+      role: 'tab',
+      'aria-selected': String(key === active),
+      onclick: () => {
+        state.tipTab = key;
+        renderCard('tips');
+      }
+    }, icon(TIP_ICONS[key]), el('span', { text: t(`tips.${key}`) })))),
+    el('div', { class: 'tips__panel', role: 'tabpanel' }, pointList(data.sections[active].points)));
 }
 
 function sightRow(item, index) {
@@ -595,7 +608,7 @@ function renderSights(items) {
   const target = options.sightTarget && items[0] ? options.sightTarget(items[0]) : null;
   return el('div', { class: 'sights' },
     types.length > 1 ? el('div', { class: 'sights__filters' }, chip('all', t('filter.all'), items.length), types.map((type) => chip(type, t(`sights.type.${type}`), items.filter((item) => item.type === type).length))) : null,
-    target ? null : el('p', { class: 'discover__note', text: t('sights.saveHint') }),
+
     el('ul', { class: 'sight-list' }, shown.map(sightRow)),
     visible.length > shown.length ? el('button', {
       type: 'button',
@@ -606,7 +619,7 @@ function renderSights(items) {
       }
     }, el('span', { text: t('sights.more', { n: visible.length - shown.length }) })) : null,
     resultFor('sights') && resultFor('sights').partial ? el('p', { class: 'discover__loading discover__loading--inline' }, el('span', { class: 'spinner' }), el('span', { text: t('sights.loadingMore') })) : null,
-    el('p', { class: 'discover__note', text: t('sights.source') }));
+    null);
 }
 
 const RENDERERS = { summary: renderSummary, weather: renderWeather, country: renderCountry, safety: renderSafety, tips: renderTips, sights: renderSights };
@@ -658,7 +671,6 @@ export function renderDiscover() {
   }
   root.replaceChildren(el('div', { class: 'discover' },
     placeChips(),
-    state.place.detail ? el('p', { class: 'discover__detail', text: state.place.detail }) : null,
     CARDS.map(cardNode)));
   if (options.onHeader) options.onHeader();
 }
