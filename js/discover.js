@@ -1,7 +1,7 @@
 import { t, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
 import { reverseGeocode } from './api.js';
-import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchAdvisories, fetchEmergency, fetchGuide, fetchSights, countryName, SIGHT_TYPES } from './info.js';
+import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchPlaceAdvisories, fetchEmergency, fetchGuide, fetchSights, countryName, SIGHT_TYPES } from './info.js';
 import { el, icon, distance, errorMessage, formatNumber, gallery } from './ui.js';
 
 const CARDS = ['summary', 'weather', 'sights', 'country', 'safety', 'tips'];
@@ -121,7 +121,7 @@ async function resolvePlace(place) {
   if (place.country && place.wikidata) return place;
   if (state.resolving && state.resolving.place === place) return state.resolving.promise;
   const promise = reverseGeocode(place.lat, place.lon, getLanguage()).then((info) => {
-    const merged = { ...place, country: place.country || info.country, wikidata: place.wikidata || (place.source !== 'search' ? info.wikidata : null) };
+    const merged = { ...place, country: place.country || info.country, detail: place.detail || info.region || '', wikidata: place.wikidata || (place.source !== 'search' ? info.wikidata : null) };
     if (state.place === place) {
       state.place = merged;
       save('discoverPlace', merged);
@@ -142,13 +142,13 @@ const LOADERS = {
   },
   safety: async (place, lang) => {
     const [advisories, emergency, guide] = await Promise.all([
-      place.country ? fetchAdvisories(place.country) : [],
+      place.country ? fetchPlaceAdvisories(place).catch(() => ({ scope: 'none', items: [] })) : { scope: 'none', items: [] },
       place.country ? fetchEmergency(place.country).catch(() => null) : null,
-      fetchGuide(place, lang, place.country).catch(() => null)
+      fetchGuide(place, lang).catch(() => null)
     ]);
     return { advisories, emergency, guide, country: place.country };
   },
-  tips: async (place, lang) => fetchGuide(place, lang, place.country),
+  tips: async (place, lang) => fetchGuide(place, lang),
   sights: async (place, lang, initial) => fetchSights(place, lang, sightRadius(place), {
     onPartial: (items) => {
       if (!state.place || placeKey(state.place) !== placeKey(initial) || getLanguage() !== lang) return;
@@ -238,7 +238,7 @@ function cardNode(card) {
     }
   },
   el('span', { class: 'discover-card__icon', 'aria-hidden': 'true' }, icon(CARD_ICONS[card])),
-  el('span', { class: 'discover-card__title', text: t(`discover.${card}`) }),
+  el('span', { class: 'discover-card__title', text: card === 'safety' || card === 'tips' ? t(`discover.${card}In`, { place: state.place.name }) : t(`discover.${card}`) }),
   icon('chevron'));
   return el('section', { class: `discover-card${open ? ' is-open' : ''}`, 'data-card': card },
     header,
@@ -501,7 +501,7 @@ function levelDots(level) {
   return el('span', { class: `level-dots level-dots--${LEVEL_KEYS[level]}`, 'aria-hidden': 'true' }, [1, 2, 3, 4].map((step) => el('span', { class: step <= level ? 'is-on' : null })));
 }
 
-function safetyGauge(advisories) {
+function safetyGauge(advisories, scope) {
   const average = advisories.reduce((sum, item) => sum + item.level, 0) / advisories.length;
   const level = Math.min(4, Math.max(1, Math.round(average)));
   const position = ((average - 1) / 3) * 100;
@@ -509,6 +509,7 @@ function safetyGauge(advisories) {
     el('div', { class: 'gauge__head' },
       el('span', { class: 'gauge__label', text: t(`safety.overall.${LEVEL_KEYS[level]}`) }),
       el('span', { class: 'gauge__value', text: t('safety.scale', { value: formatNumber(Math.round(average * 10) / 10) }) })),
+    el('p', { class: 'gauge__scope', text: scope === 'place' ? t('safety.forPlace', { place: state.place.name }) : t('safety.forCountry', { country: countryName(state.place.country, getLanguage()) || '' }) }),
     el('div', { class: 'gauge__bar', role: 'img', 'aria-label': t(`safety.overall.${LEVEL_KEYS[level]}`) },
       [1, 2, 3, 4].map((step) => el('span', { class: `gauge__segment gauge__segment--${LEVEL_KEYS[step]}` })),
       el('span', { class: 'gauge__marker', style: `left:${position}%` })),
@@ -519,7 +520,7 @@ function advisoryRow(item) {
   return el('li', { class: 'advisory' },
     el('span', { class: 'advisory__source', text: t(`safety.source.${item.id}`) }),
     levelDots(item.level),
-    el('a', { class: 'advisory__text', href: item.url, target: '_blank', rel: 'noopener noreferrer', text: t(`safety.levelText.${item.id}.${item.level}`) }));
+    el('a', { class: 'advisory__text', href: item.url, target: '_blank', rel: 'noopener noreferrer', text: item.match ? t(item.city ? `safety.areaText.${item.level}` : 'safety.regionText') : item.known && item.level < item.countryLevel ? t('safety.notListed') : t(`safety.levelText.${item.id}.${item.level}`) }));
 }
 
 function pointList(points, className = 'points') {
@@ -528,20 +529,28 @@ function pointList(points, className = 'points') {
   })));
 }
 
+function capitalize(value) {
+  return value ? value.replace(/(^|\s)\S/g, (char) => char.toUpperCase()) : value;
+}
+
 function renderSafety(data) {
   if (!data) return empty(t('safety.none'));
   const section = data.guide && data.guide.sections.safety;
-  const advisories = data.advisories || [];
+  const advice = data.advisories || { items: [] };
+  const items = advice.items || [];
+  const points = [];
+  if (advice.match) points.push(t(advice.cityMatch ? 'safety.pointListed' : 'safety.pointRegion', { region: capitalize(advice.match) }));
+  else if (advice.scope === 'place' && advice.partial) points.push(t('safety.pointNotListed', { place: state.place.name }));
+  if (section) points.push(...section.points);
   return el('div', { class: 'safety' },
-    advisories.length ? safetyGauge(advisories) : null,
-    advisories.length ? el('ul', { class: 'advisories' }, advisories.map(advisoryRow)) : el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
+    items.length ? safetyGauge(items, advice.scope) : null,
+    items.length ? el('ul', { class: 'advisories' }, items.map(advisoryRow)) : el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
     data.emergency && data.emergency.length ? el('div', { class: 'emergency' },
       icon('phone'),
       el('span', { class: 'emergency__label', text: t('safety.emergency') }),
       data.emergency.map((number) => el('a', { class: 'emergency__number', href: `tel:${number.replace(/[^\d+]/g, '')}`, text: number }))) : null,
-    section ? el('p', { class: 'discover__subtitle', text: t('safety.inShort') }) : null,
-    section ? pointList(section.points) : null,
-    advisories.length ? null : el('div', { class: 'discover__links' }, el('a', { class: 'btn btn--secondary btn--small', href: 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise', target: '_blank', rel: 'noopener noreferrer' }, el('span', { text: t('safety.source.de') }), icon('external'))));
+    points.length ? el('p', { class: 'discover__subtitle', text: t('safety.inShort') }) : null,
+    points.length ? pointList(points) : null);
 }
 
 function renderTips(data) {
@@ -654,7 +663,7 @@ function placeChips() {
       } catch {
         info = null;
       }
-      setDiscoverPlace({ name: (info && info.name) || t('discover.mapCenter'), lat: center.lat, lon: center.lon, country: info && info.country, wikidata: info && info.wikidata, source: 'center' });
+      setDiscoverPlace({ name: (info && info.name) || t('discover.mapCenter'), detail: info && info.region, lat: center.lat, lon: center.lon, country: info && info.country, wikidata: info && info.wikidata, source: 'center' });
       activateDiscover();
       if (options.onPlaceChange) options.onPlaceChange(state.place);
     }

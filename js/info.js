@@ -410,6 +410,72 @@ async function bundledAdvice(id) {
   return list;
 }
 
+function plainText(value) {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const EXCEPT = /\b(?:except|excluding|other than|ausgenommen|ausser|mit ausnahme|excepto|salvo)\b[^.\n;)]*/g;
+
+const WHOLE = /(all of|whole of|entire|samtliche|gesamte|ganze|todo el|toda la)[^.\n]{0,40}$/;
+
+function mentioned(text, names) {
+  if (!text) return null;
+  const plain = plainText(text);
+  const excluded = (plain.match(EXCEPT) || []).join(' ');
+  const pattern = (name) => new RegExp(`(^|[^a-z])${escapeRegExp(name)}([^a-z]|$)`);
+  if (names[0] && pattern(names[0]).test(excluded)) return null;
+  const cleaned = plain.replace(EXCEPT, ' ');
+  for (const name of names) {
+    const found = pattern(name).exec(cleaned);
+    if (found) return { name, whole: WHOLE.test(cleaned.slice(Math.max(0, found.index - 60), found.index + 1)) };
+  }
+  return null;
+}
+
+let areaFiles = new Map();
+
+async function areaFile(id) {
+  if (!areaFiles.has(id)) {
+    areaFiles.set(id, fetch(`data/advice/${id}.json`, { cache: 'no-cache' }).then((response) => (response.ok ? response.json() : null)).catch(() => null));
+  }
+  return areaFiles.get(id);
+}
+
+function localLevel(source, level, areas, names) {
+  const text = areas && areas[source];
+  if (!text) return { level, match: null, known: false };
+  const results = [[4, mentioned(text['4'], names)], [3, mentioned(text['3'], names)]].filter(([, hit]) => hit).map(([found, hit]) => {
+    const city = hit.name === names[0];
+    const full = city || hit.whole || source === 'us';
+    return { level: full ? Math.max(found, source === 'us' ? level : found) : Math.max(source === 'us' ? level : 2, 2), match: hit.name, city: city || hit.whole, known: true };
+  });
+  if (results.length) return results.reduce((best, item) => (item.level > best.level ? item : best));
+  if (source === 'us') return { level, match: null, known: true };
+  if (source === 'de') return { level: level === 3 ? 2 : level, match: null, known: true };
+  return { level: level === 4 ? 4 : 1, match: null, known: true };
+}
+
+export async function fetchPlaceAdvisories(place) {
+  const id = String(place.country || '').toLowerCase();
+  if (!/^[a-z]{2}$/.test(id)) return { scope: 'none', items: [] };
+  const [country, areas] = await Promise.all([fetchAdvisories(id), areaFile(id)]);
+  const countryNames = LANGS.map((lang) => plainText(countryName(id, lang))).filter(Boolean);
+  const names = [place.name, ...String(place.detail || '').split(',')]
+    .map((item) => plainText(item).replace(/\b(departamento|department|province|provincia|region|region de|estado|state|municipio)\b/g, '').trim())
+    .filter((item, index, all) => item.length >= 4 && !/\d/.test(item) && !countryNames.includes(item) && all.indexOf(item) === index);
+  const items = country.map((item) => {
+    const local = localLevel(item.id, item.level, areas, names);
+    return { ...item, countryLevel: item.level, level: local.level, match: local.match, city: Boolean(local.city), known: local.known };
+  });
+  const scoped = items.some((item) => item.known);
+  const hit = items.find((item) => item.match && item.city) || items.find((item) => item.match);
+  return { scope: scoped ? 'place' : 'country', items, match: hit ? hit.match : null, cityMatch: Boolean(hit && hit.city), partial: items.some((item) => item.known && item.countryLevel > 1 && item.countryLevel < 4) };
+}
+
 export async function fetchAdvisories(code) {
   const id = String(code || '').toLowerCase();
   if (!/^[a-z]{2}$/.test(id)) return [];
@@ -428,7 +494,6 @@ const GUIDE_SECTIONS = {
   respect: /^(respect|respekt|verhalten|umgangsformen|respeto)/i,
   health: /^(stay healthy|gesundheit|salud)/i
 };
-const COUNTRY_FALLBACK = ['safety', 'respect', 'health'];
 const KEYWORDS = {
   safety: /taxi|uber|nacht|night|noche|dieb|theft|robo|ladr|pickpocket|taschendieb|überfall|raub|robbery|asalto|atraco|meid|avoid|evit|drog|drug|betrug|scam|estafa|gefähr|danger|peligr|unsicher|unsafe|insegur|wertsach|valuable|objetos|allein|alone|solo|polizei|police|polic/i,
   around: /taxi|uber|\bbus|buseta|colectivo|metro|tram|zu fuß|walk|a pie|caminar|preis|price|precio|kostet|cuesta|\d[\d.,]*\s?(?:cop|usd|eur|€|\$|pesos?)|fahrrad|bike|bici|mototaxi|ticket|tarjeta/i,
@@ -462,21 +527,22 @@ function keyPoints(lines, topic, max = 3) {
   const candidates = [];
   lines.paragraphs.forEach((paragraph, pIndex) => {
     sentences(paragraph).forEach((sentence, sIndex) => {
-      if (sentence.length < 25) return;
+      if (sentence.length < 25 || sentence.length > 170) return;
       const hits = (sentence.match(new RegExp(KEYWORDS[topic].source, 'gi')) || []).length;
       if (!hits) return;
-      const score = hits * 2 + (pIndex === 0 ? 0.5 : 0) - Math.max(0, sentence.length - 160) / 60;
+      const score = hits * 2 + (pIndex === 0 ? 0.5 : 0) - sentence.length / 200;
       candidates.push({ sentence, score, order: pIndex * 100 + sIndex });
     });
   });
   if (topic !== 'eat' && topic !== 'drink') {
     lines.listings.forEach((item, index) => {
+      if (item.text.length > 150 || item.text.length < 25) return;
       const hits = (item.text.match(new RegExp(KEYWORDS[topic].source, 'gi')) || []).length;
       if (hits) candidates.push({ sentence: item.text, score: hits * 1.5, order: 10000 + index });
     });
   }
   const chosen = candidates.filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, max).sort((a, b) => a.order - b.order);
-  const points = chosen.map((item) => trimText(item.sentence, 115));
+  const points = chosen.map((item) => item.sentence);
   if ((topic === 'eat' || topic === 'drink') && lines.listings.length) {
     const names = lines.listings.map((item) => item.name).filter((name) => name.length > 1).slice(0, 3);
     if (names.length) {
@@ -484,7 +550,10 @@ function keyPoints(lines, topic, max = 3) {
       points.push({ names });
     }
   }
-  if (!points.length && lines.paragraphs.length) points.push(trimText(sentences(lines.paragraphs[0])[0] || lines.paragraphs[0], 115));
+  if (!points.length) {
+    const first = lines.paragraphs.flatMap((paragraph) => sentences(paragraph)).find((sentence) => sentence.length >= 25 && sentence.length <= 200);
+    if (first) points.push(first);
+  }
   return points;
 }
 
@@ -545,30 +614,18 @@ async function guideFor(lang, title, keys) {
   }
 }
 
-export async function fetchGuide(place, lang, countryCode = null) {
+export async function fetchGuide(place, lang) {
   const key = `${lang}|${place.wikidata || `${place.name}|${place.lat.toFixed(1)},${place.lon.toFixed(1)}`}`;
-  return withCache('guide2', key, 7 * DAY, 10, async () => {
+  return withCache('guide3', key, 7 * DAY, 10, async () => {
     const links = place.wikidata ? await wikidataLinks(place.wikidata).catch(() => ({ voyage: {} })) : { voyage: {} };
     const keys = Object.keys(GUIDE_SECTIONS);
     const sources = [];
     const local = await guideFor(lang, links.voyage[lang] || place.name, keys);
     if (local) sources.push(local);
-    const missing = () => keys.filter((item) => !sources.some((source) => source.sections[item]));
-    if (missing().length && lang !== 'en' && (links.voyage.en || !local)) {
-      const english = await guideFor('en', links.voyage.en || place.name, missing());
+    const missing = keys.filter((item) => !sources.some((source) => source.sections[item]));
+    if (missing.length && lang !== 'en') {
+      const english = await guideFor('en', links.voyage.en || place.name, missing);
       if (english) sources.push(english);
-    }
-    const countryMissing = missing().filter((item) => COUNTRY_FALLBACK.includes(item));
-    if (countryCode && countryMissing.length) {
-      const name = countryName(countryCode, lang);
-      const country = name && name !== place.name ? await guideFor(lang, name, countryMissing) : null;
-      if (country) sources.push(country);
-      const still = missing().filter((item) => COUNTRY_FALLBACK.includes(item));
-      const englishName = countryName(countryCode, 'en');
-      if (still.length && lang !== 'en' && englishName) {
-        const englishCountry = await guideFor('en', englishName, still);
-        if (englishCountry) sources.push(englishCountry);
-      }
     }
     if (!sources.length) return null;
     const sections = {};

@@ -4253,6 +4253,12 @@ body[data-tab="route"] .area-btn {
   color: var(--text-2);
 }
 
+.gauge__scope {
+  margin: -6px 0 10px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
 .gauge__bar {
   position: relative;
   display: grid;

@@ -25,8 +25,8 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
   - Wetter (Open-Meteo): jetzt und bis 16 Tage, Aufenthaltstage markiert; für spätere Reisedaten typisches Wetter der letzten 3 Jahre
   - Sehenswürdigkeiten (OpenStreetMap) nach Bekanntheit sortiert (Wikidata), mit Foto, Wikipedia-Text, Filter nach Art und eigener Karten-Ebene; „Für <Ort> merken“ – erscheint am Ort in der Route und im Reiseplan
   - Land & Geld (REST Countries, ExchangeRate-API): Hauptstadt, Sprachen, Währung mit Umrechnung, Vorwahl, Ortszeit, Fahrseite
-  - Sicherheit: Diagramm mit der Einschätzung von Deutschland (Auswärtiges Amt), Großbritannien (GOV.UK) und den USA (State Department), Notrufnummern (Wikidata) und „Kurz gesagt“ – die wichtigsten Punkte aus Wikivoyage
-  - Tipps mit eigenen Reitern: pro Thema höchstens drei kurze Punkte (Herumkommen, Essen, Ausgehen, Verhalten vor Ort, Gesundheit) aus Wikivoyage, Rückfall auf Englisch mit Übersetzung bzw. die Länderseite
+  - Sicherheit für den Ort: Diagramm mit der Einschätzung von Deutschland (Auswärtiges Amt), Großbritannien (GOV.UK) und den USA (State Department) – die App prüft, ob Stadt oder Region in den Warnungen genannt werden (`data/advice/<land>.json`), sonst gilt die Landesstufe; Notrufnummern (Wikidata) und „Kurz gesagt“ aus der Wikivoyage-Seite der Stadt
+  - Tipps für die Stadt mit eigenen Reitern: höchstens drei vollständige, kurze Sätze pro Thema (Herumkommen, Essen, Ausgehen, Verhalten vor Ort, Gesundheit) aus der Wikivoyage-Seite der Stadt, notfalls aus der englischen Seite mit Übersetzung
   - Sehenswürdigkeiten kommen zuerst schnell aus Wikipedia (Ortssuche), OpenStreetMap ergänzt danach; Land & Geld mit Rückfall auf Wikidata
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus

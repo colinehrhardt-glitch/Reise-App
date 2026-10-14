@@ -776,6 +776,7 @@ export async function reverseGeocode(lat, lon, lang) {
   const place = {
     name: cleanText(address.city || address.town || address.village || address.municipality || address.county || data.name || '') || null,
     country: countryCode(address),
+    region: cleanText(address.state || address.region || address.county || '') || null,
     wikidata: wikidataId(data && data.extratags)
   };
   reverseCache.set(key, place);
