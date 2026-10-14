@@ -3,7 +3,8 @@ import { load, save } from './storage.js';
 import { searchPlaces, fetchCategories, fetchAccommodationsFallback, fetchPhoto, ACCOMMODATION_TYPES, POI_CATEGORIES } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, link, formatNumber, distance, errorMessage, toast } from './ui.js';
-import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, stayTargetFor, stayStatus, toggleStay, stayDatesFor } from './planner.js';
+import { getRecent, addRecent, clearRecent } from './recent.js';
+import { initPlanner, renderPlanner, addStop, refreshStart, fitRoute, retryFailed, stayTargetFor, stayStatus, toggleStay, stayDatesFor } from './planner.js';
 
 const MIN_SEARCH_ZOOM = 13;
 const LOCATE_ZOOM = 14;
@@ -35,6 +36,7 @@ const state = {
   staysCount: '',
   routeCount: '',
   areaName: null,
+  areaCountry: null,
   areaController: null,
   loadFailed: null,
   sheet: 'peek',
@@ -44,11 +46,25 @@ const state = {
   favoriteSort: pick(load('favoriteSort', 'added'), FAVORITE_SORTS, 'added'),
   resultSort: pick(load('resultSort', 'recommended'), RESULT_SORTS, 'recommended'),
   theme: pick(load('theme', 'auto'), THEMES, 'auto'),
-  layers: sanitizeLayers(load('layers', {}))
+  layers: sanitizeLayers(load('layers', {})),
+  view: sanitizeView(load('view', null))
 };
 
 function pick(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback;
+}
+
+function sanitizeView(raw) {
+  if (!raw || !Number.isFinite(raw.lat) || !Number.isFinite(raw.lon) || !Number.isFinite(raw.zoom)) return null;
+  if (Math.abs(raw.lat) > 85 || Math.abs(raw.lon) > 180) return null;
+  return { lat: raw.lat, lon: raw.lon, zoom: Math.min(19, Math.max(2, Math.round(raw.zoom))) };
+}
+
+let viewTimer = 0;
+
+function rememberView() {
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => save('view', mapView.getView()), 600);
 }
 
 function sanitizeLayers(raw) {
@@ -236,7 +252,7 @@ function layerRow({ title, desc, color, iconName, checked, onChange, extra = nul
   const input = el('input', { type: 'checkbox', class: 'switch' });
   input.checked = checked;
   input.addEventListener('change', () => onChange(input.checked));
-  return el('label', { class: 'layer-row' },
+  return el('label', { class: 'layer-row', style: `--c:${color}` },
     dot(color, iconName),
     el('span', { class: 'layer-row__text' },
       el('span', { class: 'layer-row__title', text: title }),
@@ -459,7 +475,12 @@ function renderResults() {
   else if (!visible.length) empty = t('results.noneFiltered');
   dom.resultsEmpty.textContent = empty;
   dom.listToolbar.hidden = visible.length < 2;
-  setStaysTitle(state.areaName ? t('results.titleIn', { place: state.areaName }) : t('results.title'));
+  setStaysTitle(state.areaName ? t('results.titleIn', { place: state.areaName }) : state.searched ? t('results.title') : t('results.welcome'));
+  renderRecentChips();
+  if (dom.chips.classList.contains('is-idle') === state.searched) {
+    dom.chips.classList.toggle('is-idle', !state.searched);
+    setSheet(state.sheet, false);
+  }
   dom.resultsList.replaceChildren(...visible.map((place, index) => placeItem(place, state.origin, 'results', isTopPick(place, index))));
   renderChips();
   renderMarkers();
@@ -635,7 +656,8 @@ function addToRouteButton(item) {
     class: 'btn btn--secondary popup__add',
     onclick: () => {
       const name = item.name || (item.kind === 'poi' ? t(`poi.${item.type}`) : placeName(item));
-      if (addStop({ name, detail: item.address || item.city || null, lat: item.lat, lon: item.lon })) {
+      const country = state.areaCountry && state.origin && distance(state.origin, item) < 150000 ? state.areaCountry : null;
+      if (addStop({ name, detail: item.address || item.city || null, country, lat: item.lat, lon: item.lon })) {
         toast(t('route.added', { name }), { action: { label: t('route.show'), onClick: () => setTab('route') } });
       }
     }
@@ -830,6 +852,7 @@ function renderLoading(areaName) {
   setStaysTitle(areaName ? t('results.titleIn', { place: areaName }) : t('results.title'));
   setStaysCount(t('area.loading'));
   dom.resultsEmpty.textContent = '';
+  dom.recent.hidden = true;
   dom.listToolbar.hidden = true;
   dom.resultsList.replaceChildren(...Array.from({ length: 5 }, skeletonItem));
   dom.sheetBody.scrollTop = 0;
@@ -943,6 +966,8 @@ async function searchArea({ areaName = null, area = null } = {}) {
 function showSearchMessage(message, isError = false) {
   dom.searchMessage.textContent = message;
   dom.searchMessage.classList.toggle('is-error', isError);
+  dom.searchMessage.classList.remove('is-label');
+  dom.searchPanel.dataset.mode = 'message';
   dom.searchResults.replaceChildren();
   dom.searchPanel.hidden = false;
 }
@@ -951,19 +976,71 @@ function hideSearchPanel() {
   dom.searchPanel.hidden = true;
 }
 
-function renderSearchResults(results) {
-  dom.searchMessage.textContent = '';
-  dom.searchResults.replaceChildren(...results.map((result) => el('li', {},
+function searchHit(result, iconName) {
+  return el('li', {},
     el('button', { type: 'button', class: 'search-hit', onclick: () => chooseSearchResult(result) },
-      el('span', { class: 'search-hit__icon' }, icon('place')),
+      el('span', { class: 'search-hit__icon' }, icon(iconName)),
       el('span', { class: 'search-hit__text' },
         el('span', { class: 'search-hit__name', text: result.name }),
-        result.detail ? el('span', { class: 'search-hit__detail', text: result.detail }) : null)))));
+        result.detail ? el('span', { class: 'search-hit__detail', text: result.detail }) : null)));
+}
+
+function renderSearchResults(results) {
+  dom.searchMessage.textContent = '';
+  dom.searchMessage.classList.remove('is-error', 'is-label');
+  dom.searchPanel.dataset.mode = 'results';
+  dom.searchResults.replaceChildren(...results.map((result) => searchHit(result, 'place')));
   dom.searchPanel.hidden = false;
+}
+
+function showRecent() {
+  const recent = getRecent(dom.searchInput.value);
+  if (!recent.length) {
+    if (dom.searchPanel.dataset.mode !== 'results' || !dom.searchInput.value) hideSearchPanel();
+    return;
+  }
+  dom.searchMessage.textContent = t('recent.title');
+  dom.searchMessage.classList.remove('is-error');
+  dom.searchMessage.classList.add('is-label');
+  dom.searchPanel.dataset.mode = 'recent';
+  dom.searchResults.replaceChildren(...recent.map((result) => searchHit(result, 'clock')),
+    el('li', { class: 'search-panel__footer' }, el('button', {
+      type: 'button',
+      class: 'link-btn',
+      text: t('recent.clear'),
+      onclick: () => {
+        clearRecent();
+        hideSearchPanel();
+        renderResults();
+        dom.searchInput.focus();
+      }
+    })));
+  dom.searchPanel.hidden = false;
+}
+
+function renderRecentChips() {
+  const recent = state.searched || state.loadFailed ? [] : getRecent();
+  dom.recent.hidden = !recent.length;
+  if (!recent.length) {
+    dom.recent.replaceChildren();
+    return;
+  }
+  dom.recent.replaceChildren(
+    el('p', { class: 'recent__title', text: t('recent.title') }),
+    el('div', { class: 'recent__list' }, recent.map((result) => el('button', {
+      type: 'button',
+      class: 'recent__chip',
+      onclick: () => {
+        dom.searchInput.value = result.name;
+        chooseSearchResult(result);
+      }
+    }, icon('clock'), el('span', { text: result.name })))));
 }
 
 async function chooseSearchResult(result) {
   hideSearchPanel();
+  addRecent(result);
+  state.areaCountry = result.country || null;
   dom.searchInput.value = result.name;
   updateClearButton();
   dom.searchInput.blur();
@@ -1041,6 +1118,7 @@ function locate(initial = false) {
   requestLocation().then((user) => {
     state.locating = false;
     dom.locateBtn.classList.remove('is-busy');
+    if (initial && state.view) return;
     mapView.flyToLocation(user.lat, user.lon, Math.max(LOCATE_ZOOM, initial ? 0 : mapView.getZoom()), !initial);
   }).catch((error) => {
     state.locating = false;
@@ -1194,11 +1272,12 @@ function bindEvents() {
   dom.searchForm.addEventListener('submit', handleSearch);
   dom.searchInput.addEventListener('input', () => {
     updateClearButton();
-    if (dom.searchMessage.classList.contains('is-error')) hideSearchPanel();
+    showRecent();
   });
   dom.searchInput.addEventListener('focus', () => {
     toggleLayers(false);
-    if (dom.searchResults.children.length) dom.searchPanel.hidden = false;
+    if (!dom.searchInput.value) showRecent();
+    else if (dom.searchResults.children.length && dom.searchPanel.dataset.mode === 'results') dom.searchPanel.hidden = false;
   });
   dom.searchClear.addEventListener('click', () => {
     dom.searchInput.value = '';
@@ -1206,6 +1285,7 @@ function bindEvents() {
     dom.searchResults.replaceChildren();
     hideSearchPanel();
     dom.searchInput.focus();
+    showRecent();
   });
   dom.areaBtn.addEventListener('click', () => searchArea());
   dom.tabStays.addEventListener('click', () => setTab('stays'));
@@ -1256,6 +1336,10 @@ function bindEvents() {
     }, 120);
   });
   window.addEventListener('offline', () => toast(t('errors.offline'), { type: 'error', duration: 6000 }));
+  window.addEventListener('online', () => {
+    toast(t('common.online'), { duration: 3000 });
+    retryFailed();
+  });
   onLanguageChange(() => {
     renderAll();
     renderPlanner();
@@ -1274,7 +1358,7 @@ function collectDom() {
     areaBtn: 'area-btn', areaLabel: 'area-label', layersBtn: 'layers-btn', locateBtn: 'locate-btn', layers: 'layers',
     layersBase: 'layers-base', layersExtra: 'layers-extra', sheet: 'sheet', sheetHeader: 'sheet-header',
     resultsCount: 'results-count', chips: 'chips', sheetBody: 'sheet-body', sheetTitle: 'sheet-title', sheetTabs: 'sheet-tabs', tabStays: 'tab-stays', tabRoute: 'tab-route', routeBody: 'route-body', resultsRetry: 'results-retry', listToolbar: 'list-toolbar',
-    resultsSort: 'results-sort', resultsEmpty: 'results-empty', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
+    resultsSort: 'results-sort', resultsEmpty: 'results-empty', recent: 'recent', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
     languageSwitch: 'language-switch', themeSwitch: 'theme-switch', sources: 'sources', toasts: 'toasts'
@@ -1292,7 +1376,11 @@ function init() {
   }
   mapView.initMap(dom.map, {
     dark: isDark(),
-    onViewChange: updateAreaButton,
+    view: state.view,
+    onViewChange: () => {
+      updateAreaButton();
+      rememberView();
+    },
     onMapClick: () => {
       hideSearchPanel();
       toggleLayers(false);
@@ -1323,7 +1411,20 @@ function init() {
   setTab(state.tab, { fit: false });
   bindEvents();
   updateClearButton();
-  locate(true);
+  locateIfAllowed();
+  registerWorker();
+}
+
+function locateIfAllowed() {
+  if (!('geolocation' in navigator) || !navigator.permissions || typeof navigator.permissions.query !== 'function') return;
+  navigator.permissions.query({ name: 'geolocation' }).then((status) => {
+    if (status.state === 'granted') locate(true);
+  }).catch(() => {});
+}
+
+function registerWorker() {
+  if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+  navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
 init();

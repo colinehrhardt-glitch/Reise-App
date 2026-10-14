@@ -3,18 +3,21 @@
 Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte, Stufe 2: Transport und Routen-Planer.
 
 ## Funktionen
-- Vollbild-Karte (OSM-Daten, Vektorkarte von OpenFreeMap, Rückfall auf OSM-Kacheln), Start am eigenen Standort
-- Ortssuche (Nominatim) mit Trefferliste
+- Vollbild-Karte (OSM-Daten, Vektorkarte von OpenFreeMap, Rückfall auf OSM-Kacheln); öffnet an der zuletzt angesehenen Stelle, der Standort wird nur auf Wunsch abgefragt
+- Ortssuche (Nominatim) mit Trefferliste und „Zuletzt gesucht“ (auch im Routen-Planer, Verlauf löschbar)
+- Als App auf dem Home-Bildschirm installierbar (PWA); öffnet auch offline mit gespeicherter Route, Favoriten und Reiseplan
 - „In diesem Bereich suchen“: Hotels, Hostels, Gästehäuser, Apartments, Motels (Overpass API)
 - Filter, Sortierung (Empfohlen, Sterne, Entfernung), Marker-Clustering, ausziehbare Ergebnisliste
 - Popups mit Foto (Wikimedia Commons/Wikidata), Ausstattung, Kontakt und Preis-Links (Booking.com, Google)
-- Ebenen-Panel mit Legende: Transport (Flughäfen, Bahnhöfe, Busbahnhöfe, Fährterminals), Geld, Einkaufen, Gesundheit, Essen & Trinken zuschaltbar
+- Ebenen-Panel (auf dem iPhone als Panel von unten) mit Legende: Transport (Flughäfen, Bahnhöfe, Busbahnhöfe, Fährterminals), Geld, Einkaufen, Gesundheit, Essen & Trinken zuschaltbar
 - Routen-Planer (Reiter „Route“): Reisebeginn, Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
 - Nächte pro Ort (auch am Startort) mit automatisch berechneten An- und Abreisetagen
+- Reiseplan Tag für Tag (Fahrten und Übernachtungen), Export in den Kalender (.ics) und Teilen als Text
+- „Automatisch wählen aus“: Verkehrsmittel für die automatische Auswahl ausschließen (z. B. keine Flüge); pro Etappe bleiben alle wählbar
 - Unterkunft pro Ort: „Unterkunft suchen“ lädt die Unterkünfte dort, im Popup „Für <Ort> merken“, Merkliste mit Auswahl, Haken „Keine Unterkunft nötig“, Warnhinweis bei Orten ohne Unterkunft; Booking.com-Links mit Check-in/Check-out
 - Routen als Pfeilketten in Reiserichtung; Flüge von Flughafen zu Flughafen (Großkreis), Bus und Bahn von Busbahnhof bzw. Bahnhof, Anfahrt als Punktlinie
 - Transfers: Anreise von der Unterkunft zum Flughafen/Bahnhof/Busbahnhof und weiter zur nächsten Unterkunft mit Taxi-/Uber-Fahrzeit, Fußweg und Links zu Uber und Bus & Bahn
-- Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen
+- Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen; keine geschätzte Bahn in Ländern ohne Personenzüge (z. B. Kolumbien)
 - Verkehrsmittel je Etappe: Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus
@@ -32,6 +35,9 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/map.js` – Karte, Marker, Popups
 - `js/api.js` – Abfragen an Nominatim, Overpass, Routing und Transitous (mit Cache)
 - `js/planner.js` – Routen-Planer
+- `js/overview.js` – Reiseplan, Kalender-Export, Teilen
+- `js/recent.js` – zuletzt gesuchte Orte
+- `sw.js`, `manifest.webmanifest`, `icons/` – App-Installation und Offline-Start
 - `js/ui.js` – gemeinsame Bausteine (Elemente, Symbole, Hinweise)
 - `data/airports.json` – Flughäfen mit Linienverkehr (aus OurAirports, gemeinfrei)
 - `js/i18n.js` – Übersetzungen

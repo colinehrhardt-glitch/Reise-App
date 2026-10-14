@@ -31,6 +31,9 @@ export const ICONS = {
   phone: '<path d="M6.5 3.5h3l1.5 4.5-2 1.3a10.5 10.5 0 0 0 5.7 5.7l1.3-2 4.5 1.5v3a2 2 0 0 1-2 2A15.5 15.5 0 0 1 4.5 5.5a2 2 0 0 1 2-2z"/>',
   mail: '<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="m4 7 8 6 8-6"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  calendar: '<rect x="4" y="5.5" width="16" height="14.5" rx="2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/>',
+  share: '<path d="M12 14.5V3.5M8 7.5l4-4 4 4"/><path d="M8 10.5H6a1 1 0 0 0-1 1V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-7.5a1 1 0 0 0-1-1h-2"/>',
+  list: '<path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1"/><circle cx="4.8" cy="12" r="1"/><circle cx="4.8" cy="17.5" r="1"/>',
   tag: '<path d="M3.5 12.5V4.5h8l9 9-8 8z"/><circle cx="8" cy="9" r="1.5"/>',
   route: '<path d="M4 11.5 20 4l-7.5 16-1.8-6.7z"/>',
   close: '<path d="M7 7l10 10M17 7 7 17"/>',
@@ -168,7 +171,8 @@ export function initMap(container, options = {}) {
     maxZoom: 20,
     tapTolerance: 20
   });
-  map.setView(WORLD_VIEW.center, WORLD_VIEW.zoom);
+  if (options.view) map.setView([options.view.lat, options.view.lon], options.view.zoom);
+  else map.setView(WORLD_VIEW.center, WORLD_VIEW.zoom);
   map.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>');
   setMapTheme(options.dark);
 
@@ -271,6 +275,11 @@ export function setAttribution(html) {
 
 export function setInsets(next) {
   insets = { ...insets, ...next };
+}
+
+export function getView() {
+  const center = map.getCenter().wrap();
+  return { lat: Number(center.lat.toFixed(5)), lon: Number(center.lng.toFixed(5)), zoom: map.getZoom() };
 }
 
 export function getZoom() {
@@ -607,6 +616,7 @@ function stopIcon(label, start) {
   });
 }
 
+const TERMINAL_ZOOM = 10;
 const ARROW_SPACING = 24;
 const ARROW_LIMIT = 2500;
 const ARROW_SHAPE = [[-7, -6], [1, -6], [8, 0], [1, 6], [-7, 6], [-1.5, 0]];
@@ -716,7 +726,8 @@ function drawRoute() {
       }).addTo(routeLayer);
       arrows.on('click', pick);
     }
-    for (const terminal of leg.terminals || []) {
+    const showTerminals = map.getZoom() >= TERMINAL_ZOOM || (hasSelection && index === selected);
+    for (const terminal of showTerminals ? leg.terminals || [] : []) {
       if (!terminal) continue;
       L.marker([terminal.lat, terminal.lon], { icon: terminalIcon(terminal), keyboard: false, zIndexOffset: 1000, title: terminal.name || terminal.label || '' }).addTo(routeLayer);
     }

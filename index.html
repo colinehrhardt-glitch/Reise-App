@@ -11,6 +11,8 @@
   <meta name="apple-mobile-web-app-title" content="Viaro">
   <title>Viaro</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230b7285'/%3E%3Cpath d='M18 20l14 26 14-26' fill='none' stroke='%23fff' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" integrity="sha256-YU3qCpj/P06tdPBJGPax0bm6Q1wltfwjsho5TR4+TYc=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" integrity="sha256-qx5w1Z7EBGW65+cDDaLzzPKBM/1QLmK9WY7vut/XpzI=" crossorigin="">
@@ -88,6 +90,7 @@
         <select class="select select--compact" id="results-sort"></select>
       </div>
       <p class="empty" id="results-empty"></p>
+      <div class="recent" id="recent" hidden></div>
       <div class="retry-row"><button type="button" class="btn btn--secondary" id="results-retry" hidden data-i18n="common.retry"></button></div>
       <ul class="place-list" id="results-list" data-i18n-attr="aria-label:results.listLabel"></ul>
     </div>

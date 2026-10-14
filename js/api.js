@@ -127,6 +127,7 @@ export async function searchPlaces(query, lang, { countries = [] } = {}) {
     q: query.trim(),
     format: 'jsonv2',
     limit: '5',
+    addressdetails: '1',
     'accept-language': lang
   });
   if (codes) params.set('countrycodes', codes);
@@ -153,10 +154,16 @@ function normalizeSearchResult(item) {
     rank: Number(item.place_rank) || 0,
     kind: String(item.addresstype || item.type || ''),
     importance: Number(item.importance) || 0,
+    country: countryCode(item.address),
     bounds: box && box.every(Number.isFinite)
       ? { south: box[0], north: box[1], west: box[2], east: box[3] }
       : null
   };
+}
+
+function countryCode(address) {
+  const code = address && typeof address.country_code === 'string' ? address.country_code.toLowerCase() : '';
+  return /^[a-z]{2}$/.test(code) ? code : null;
 }
 
 function roughKm(a, b) {
@@ -589,9 +596,11 @@ const FOSSGIS_URLS = {
 const TRANSITOUS_URL = 'https://api.transitous.org/api/';
 const TRANSITOUS_VERSIONS = ['v5', 'v4', 'v2'];
 const ROUTE_TTL = 6 * 60 * 60 * 1000;
+const STREET_TTL = 7 * 24 * 60 * 60 * 1000;
 const ROUTE_PERSIST = 80;
 const ROUTE_POINTS = 400;
-const routeCache = new Map(Object.entries(load('routes', {}) || {}).filter(([, entry]) => entry && Date.now() - entry.time < ROUTE_TTL));
+const ttlFor = (key) => (key.startsWith('street|') ? STREET_TTL : ROUTE_TTL);
+const routeCache = new Map(Object.entries(load('routes', {}) || {}).filter(([key, entry]) => entry && Date.now() - entry.time < ttlFor(key)));
 let routeSaveTimer = 0;
 
 function thin(coords) {
@@ -631,7 +640,7 @@ function pointKey(point) {
 function cached(key) {
   const entry = routeCache.get(key);
   if (!entry) return null;
-  if (Date.now() - entry.time > ROUTE_TTL) {
+  if (Date.now() - entry.time > ttlFor(key)) {
     routeCache.delete(key);
     return null;
   }
@@ -757,9 +766,12 @@ export async function reverseGeocode(lat, lon, lang) {
   const params = new URLSearchParams({ lat: lat.toFixed(5), lon: lon.toFixed(5), format: 'jsonv2', zoom: '10', 'accept-language': lang });
   const data = await request(`${REVERSE_URL}?${params}`, { headers: { Accept: 'application/json' } }, 10000);
   const address = (data && data.address) || {};
-  const name = cleanText(address.city || address.town || address.village || address.municipality || address.county || data.name || '') || null;
-  reverseCache.set(key, name);
-  return name;
+  const place = {
+    name: cleanText(address.city || address.town || address.village || address.municipality || address.county || data.name || '') || null,
+    country: countryCode(address)
+  };
+  reverseCache.set(key, place);
+  return place;
 }
 
 const AIRPORT_RADIUS = 150;

@@ -3,6 +3,8 @@ import { load, save } from './storage.js';
 import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearestStation } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
+import { getRecent, addRecent } from './recent.js';
+import { buildIcs, downloadFile, shareText, overviewList } from './overview.js';
 
 export const MODES = ['walk', 'car', 'bus', 'train', 'ferry', 'flight'];
 
@@ -15,6 +17,7 @@ const STAY_RADIUS = 30000;
 const TARGET_RADIUS = 60000;
 const DAY = 24 * 60 * 60 * 1000;
 const STAY_TYPES = ['hotel', 'hostel', 'guest_house', 'apartment', 'motel'];
+const NO_PASSENGER_RAIL = new Set(['ad', 'bb', 'bh', 'bi', 'bn', 'bs', 'bt', 'bz', 'co', 'cy', 'do', 'fj', 'gm', 'gt', 'gw', 'hn', 'ht', 'is', 'jm', 'kw', 'lr', 'ly', 'mt', 'mv', 'ne', 'ni', 'om', 'pa', 'pg', 'py', 'qa', 'rw', 'sb', 'sl', 'sm', 'so', 'sv', 'td', 'tl', 've', 'ye']);
 const MAIN_MODE = {
   AIRPLANE: 'flight', FERRY: 'ferry', BUS: 'bus', COACH: 'bus',
   HIGHSPEED_RAIL: 'train', LONG_DISTANCE: 'train', NIGHT_RAIL: 'train', REGIONAL_FAST_RAIL: 'train',
@@ -33,6 +36,7 @@ const state = {
   startPlace: null,
   stops: [],
   modes: {},
+  avoid: [],
   auto: {},
   results: {},
   options: {},
@@ -43,8 +47,11 @@ const state = {
   stayTarget: null,
   run: null,
   gpsName: null,
+  gpsCountry: null,
   gpsKey: null,
-  locating: false
+  locating: false,
+  startEditing: false,
+  overviewOpen: false
 };
 let options = {};
 const dom = {};
@@ -59,6 +66,7 @@ function validPlace(raw) {
     id: typeof raw.id === 'string' ? raw.id.slice(0, 40) : newId(),
     name: text(raw.name) || '?',
     detail: text(raw.detail),
+    country: typeof raw.country === 'string' && /^[a-z]{2}$/.test(raw.country) ? raw.country : null,
     lat: raw.lat,
     lon: raw.lon
   };
@@ -110,6 +118,8 @@ function restore() {
   state.startMode = raw.startMode === 'custom' ? 'custom' : 'gps';
   state.startPlace = raw.startPlace ? validStop({ nights: 0, ...raw.startPlace, id: 'start' }) : null;
   state.stops = Array.isArray(raw.stops) ? raw.stops.map(validStop).filter(Boolean).slice(0, 40) : [];
+  state.avoid = Array.isArray(raw.avoid) ? MODES.filter((mode) => raw.avoid.includes(mode)) : [];
+  if (state.avoid.length === MODES.length) state.avoid = [];
   state.modes = {};
   if (raw.modes && typeof raw.modes === 'object') {
     for (const [pair, mode] of Object.entries(raw.modes)) {
@@ -124,7 +134,8 @@ function persist() {
     startMode: state.startMode,
     startPlace: state.startPlace,
     stops: state.stops,
-    modes: state.modes
+    modes: state.modes,
+    avoid: state.avoid
   });
   if (!ok) toast(t('favorites.storageError'), { type: 'error', duration: 6000 });
 }
@@ -137,6 +148,7 @@ function startPoint() {
       key: 'gps',
       name: state.gpsName ? t('route.myLocationIn', { place: state.gpsName }) : t('route.startGps'),
       linkName: state.gpsName,
+      country: state.gpsCountry,
       lat: user.lat,
       lon: user.lon,
       start: true
@@ -175,8 +187,9 @@ function schedule() {
   return list.map((point) => {
     const nights = point.start && !point.holder ? 0 : point.nights || 0;
     const arrival = base ? addDays(base, offset) : null;
+    const day = offset;
     offset += nights;
-    return { arrival, departure: base ? addDays(base, offset) : null, nights };
+    return { arrival, departure: base ? addDays(base, offset) : null, nights, day, leave: offset };
   });
 }
 
@@ -202,14 +215,23 @@ function needsStay(stop) {
   return stop.nights > 0 && !stop.noStay && !stop.chosen;
 }
 
+function firstAllowed(order) {
+  return order.find((mode) => !state.avoid.includes(mode)) || order[0];
+}
+
 function suggestMode(a, b) {
   const km = distance(a, b) / 1000;
-  if (km < 2) return 'walk';
-  if (km < 700) return 'bus';
-  return 'flight';
+  if (km < 2) return firstAllowed(['walk', 'bus', 'car', 'train', 'ferry', 'flight']);
+  if (km < 700) return firstAllowed(['bus', 'train', 'car', 'ferry', 'flight', 'walk']);
+  return firstAllowed(['flight', 'train', 'bus', 'car', 'ferry', 'walk']);
 }
 
 function pickOption(list, km) {
+  const allowed = list.filter((option) => !state.avoid.includes(option.mode));
+  return chooseOption(allowed.length ? allowed : list, km);
+}
+
+function chooseOption(list, km) {
   const has = (mode) => list.find((option) => option.mode === mode);
   if (km < 2 && has('walk')) return 'walk';
   const flight = has('flight');
@@ -384,6 +406,10 @@ async function stationEstimate(a, b, mode, signal, road = null) {
   };
 }
 
+function railPossible(a, b) {
+  return !NO_PASSENGER_RAIL.has(a.country) && !NO_PASSENGER_RAIL.has(b.country);
+}
+
 function ferryEstimate(a, b) {
   const km = distance(a, b) / 1000;
   return { status: 'estimate', distance: km * 1000, duration: (km * 1.1 / 30 + 0.5) * 3600, coords: straight(a, b), note: 'route.ferryNote' };
@@ -417,7 +443,7 @@ async function computeOptions(leg, signal) {
   }
   const [bus, train] = await Promise.all([
     !found.has('bus') && road && km >= 3 ? (km >= 20 ? stationEstimate(a, b, 'bus', signal, road) : busEstimate(road)) : null,
-    !found.has('train') && km >= 30 && km <= 1500 ? stationEstimate(a, b, 'train', signal) : null
+    !found.has('train') && km >= 30 && km <= 1500 && railPossible(a, b) ? stationEstimate(a, b, 'train', signal) : null
   ]);
   if (bus) found.set('bus', bus);
   if (train) found.set('train', train);
@@ -549,7 +575,7 @@ async function computeLeg(leg, signal) {
   if (mode === 'ferry') return ferryEstimate(a, b);
   const road = await safely(() => routeStreet('car', a, b, signal));
   if (!road && !state.modes[pair]) {
-    state.auto[pair] = km < 500 ? 'ferry' : 'flight';
+    state.auto[pair] = firstAllowed(km < 500 ? ['ferry', 'flight'] : ['flight', 'ferry']);
     return { status: 'switch' };
   }
   const viaStations = await stationEstimate(a, b, mode, signal, road);
@@ -759,12 +785,42 @@ function makeSearch({ placeholder, onPick, compact = false }) {
   const results = el('ul', { class: 'planner-search__results' });
   const message = el('p', { class: 'planner-search__message', role: 'status' });
   let token = 0;
+  let showingRecent = false;
   const pick = (result) => {
     input.value = '';
     results.replaceChildren();
     message.textContent = '';
-    onPick({ name: result.name, detail: result.detail, lat: result.lat, lon: result.lon });
+    showingRecent = false;
+    addRecent(result);
+    onPick({ name: result.name, detail: result.detail, lat: result.lat, lon: result.lon, country: result.country });
   };
+  const hit = (result, iconName) => el('li', {},
+    el('button', { type: 'button', class: 'search-hit', onclick: () => pick(result) },
+      el('span', { class: 'search-hit__icon' }, icon(iconName)),
+      el('span', { class: 'search-hit__text' },
+        el('span', { class: 'search-hit__name', text: result.name }),
+        result.detail ? el('span', { class: 'search-hit__detail', text: result.detail }) : null)));
+  const showRecent = () => {
+    if (results.children.length && !showingRecent) return;
+    const recent = getRecent(input.value);
+    showingRecent = recent.length > 0;
+    results.replaceChildren(...(showingRecent ? [el('li', { class: 'planner-search__label', text: t('recent.title') }), ...recent.map((result) => hit(result, 'clock'))] : []));
+  };
+  input.addEventListener('focus', showRecent);
+  input.addEventListener('input', () => {
+    message.textContent = '';
+    if (!showingRecent) results.replaceChildren();
+    showingRecent = true;
+    showRecent();
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (showingRecent && document.activeElement !== input) {
+        results.replaceChildren();
+        showingRecent = false;
+      }
+    }, 250);
+  });
   const form = el('form', {
     class: `planner-search${compact ? ' planner-search--compact' : ''}`,
     role: 'search',
@@ -778,6 +834,7 @@ function makeSearch({ placeholder, onPick, compact = false }) {
       const current = ++token;
       message.textContent = t('search.searching');
       results.replaceChildren();
+      showingRecent = false;
       try {
         const found = await searchPlaces(query, getLanguage());
         if (current !== token) return;
@@ -790,12 +847,7 @@ function makeSearch({ placeholder, onPick, compact = false }) {
           return;
         }
         message.textContent = '';
-        results.replaceChildren(...found.map((result) => el('li', {},
-          el('button', { type: 'button', class: 'search-hit', onclick: () => pick(result) },
-            el('span', { class: 'search-hit__icon' }, icon('place')),
-            el('span', { class: 'search-hit__text' },
-              el('span', { class: 'search-hit__name', text: result.name }),
-              result.detail ? el('span', { class: 'search-hit__detail', text: result.detail }) : null)))));
+        results.replaceChildren(...found.map((result) => hit(result, 'place')));
       } catch (error) {
         if (current === token) message.textContent = errorMessage(error);
       }
@@ -824,6 +876,14 @@ async function useGps() {
 }
 
 function renderStart() {
+  const listed = state.stops.length > 0;
+  const point = startPoint();
+  if (listed && point && !state.startEditing && !state.locating) {
+    dom.start.hidden = true;
+    dom.start.replaceChildren();
+    return;
+  }
+  dom.start.hidden = false;
   const segment = (mode, label) => el('button', {
     type: 'button',
     class: 'segmented__btn',
@@ -838,47 +898,53 @@ function renderStart() {
     }
   });
   let body = null;
-  const listed = state.stops.length > 0;
+  const editing = listed && point;
   if (state.startMode === 'gps') {
     const user = options.getUser();
     if (state.locating) body = el('p', { class: 'planner-hint', text: t('route.locating') });
-    else if (user) body = listed ? null : startRow(startPoint());
+    else if (user) body = editing ? null : startRow(point);
     else {
       body = el('button', { type: 'button', class: 'btn btn--secondary planner-locate', onclick: useGps },
         icon('locate'), el('span', { text: t('route.useLocation') }));
     }
-  } else if (state.startPlace) {
-    body = startRow(startPoint(), () => {
+  } else if (state.startPlace && !editing) {
+    body = startRow(point, () => {
       state.startPlace = null;
       persist();
       update();
-    }, listed);
+    });
   } else {
     body = makeSearch({
       placeholder: t('route.startSearch'),
       compact: true,
       onPick: (place) => {
         state.startPlace = validStop({ ...place, id: 'start', nights: 0 });
+        state.startEditing = false;
         persist();
         update();
         fitRoute();
       }
     });
   }
+  const done = listed && point ? el('button', {
+    type: 'button',
+    class: 'link-btn',
+    text: t('route.done'),
+    onclick: () => {
+      state.startEditing = false;
+      renderStart();
+      renderList();
+    }
+  }) : null;
   dom.start.replaceChildren(...[
-    el('div', { class: 'planner-label' }, el('span', { text: t('route.start') })),
+    el('div', { class: 'planner-label planner-label--row' }, el('span', { text: t('route.start') }), done),
     el('div', { class: 'segmented', role: 'group', 'aria-label': t('route.start') },
       segment('gps', t('route.startGps')), segment('custom', t('route.startCustom'))),
     body
   ].filter(Boolean));
 }
 
-function startRow(point, onChange = null, compact = false) {
-  if (compact) {
-    return el('div', { class: 'start-row start-row--compact' },
-      el('span', { class: 'stop__text' }, el('span', { class: 'stop__detail', text: point.name })),
-      el('button', { type: 'button', class: 'link-btn', text: t('route.changeStart'), onclick: onChange }));
-  }
+function startRow(point, onChange = null) {
   return el('div', { class: 'start-row' },
     el('span', { class: 'stop__badge stop__badge--start', text: 'S' }),
     el('span', { class: 'stop__text' },
@@ -926,7 +992,8 @@ function legInfo(leg) {
     return el('span', { class: 'leg__info leg__info--loading' }, el('span', { class: 'spinner' }), el('span', { text: t('route.loading') }));
   }
   if (result.status === 'error') {
-    return el('span', { class: 'leg__info leg__info--error', text: result.code === 'noroute' ? t('route.noRoad') : t('route.error') });
+    const key = result.code === 'noroute' ? 'route.noRoad' : result.code === 'offline' ? 'route.offline' : 'route.error';
+    return el('span', { class: 'leg__info leg__info--error', text: t(key) });
   }
   const duration = formatDuration(result.duration);
   return el('span', { class: 'leg__info leg__info--done' },
@@ -1089,7 +1156,7 @@ function nightsControl(stop) {
   };
   return el('div', { class: 'nights', role: 'group', 'aria-label': t('route.nightsLabel') },
     el('button', { type: 'button', class: 'nights__btn', 'aria-label': t('route.nightsLess'), disabled: stop.nights <= 0, onclick: () => change(-1) }, icon('minus')),
-    el('span', { class: 'nights__value', text: stop.nights ? tCount('route.nights', stop.nights) : t('route.passThrough') }),
+    el('span', { class: 'nights__value', text: stop.nights ? tCount('route.nights', stop.nights) : t(stop.id === 'start' ? 'route.noOvernight' : 'route.passThrough') }),
     el('button', { type: 'button', class: 'nights__btn', 'aria-label': t('route.nightsMore'), disabled: stop.nights >= MAX_NIGHTS, onclick: () => change(1) }, icon('plus')));
 }
 
@@ -1180,17 +1247,67 @@ function stopRow(stop, number, plan) {
     el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
 }
 
+function editStart() {
+  state.startEditing = true;
+  renderStart();
+  requestAnimationFrame(() => dom.start.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+}
+
 function startListRow(point, plan) {
   const head = el('div', { class: 'stop__head' },
     el('span', { class: 'stop__badge stop__badge--start', text: 'S' }),
     el('span', { class: 'stop__text' },
       el('span', { class: 'stop__name', text: point.name }),
-      plan && plan.arrival ? el('span', { class: 'stop__detail', text: point.nights ? formatRange(plan.arrival, plan.departure) : t('route.departure', { date: formatDay(plan.arrival, true) }) }) : null));
+      plan && plan.arrival ? el('span', { class: 'stop__detail', text: point.nights ? formatRange(plan.arrival, plan.departure) : t('route.departure', { date: formatDay(plan.arrival, true) }) }) : null),
+    el('button', { type: 'button', class: 'link-btn', text: t('route.changeStart'), 'aria-expanded': String(state.startEditing), onclick: editStart }));
   if (!point.holder) return el('li', { class: 'stop stop--start' }, head);
   const stop = holder('start');
   return el('li', { class: `stop stop--start stop--full${needsStay(stop) ? ' needs-stay' : ''}` },
     head,
     el('div', { class: 'stop__extra' }, nightsControl(stop), stayBlock(stop)));
+}
+
+function reapplyAuto() {
+  for (const leg of legs()) {
+    if (state.modes[leg.pair]) continue;
+    if (leg.options && leg.options.status === 'ok') {
+      const picked = pickOption(leg.options.list, distance(leg.a, leg.b) / 1000);
+      if (picked) state.auto[leg.pair] = picked;
+    } else {
+      delete state.auto[leg.pair];
+    }
+  }
+}
+
+function toggleAvoid(mode) {
+  const avoided = state.avoid.includes(mode);
+  if (!avoided && MODES.length - state.avoid.length <= 1) {
+    toast(t('route.keepOneMode'));
+    return;
+  }
+  state.avoid = avoided ? state.avoid.filter((item) => item !== mode) : [...state.avoid, mode];
+  persist();
+  reapplyAuto();
+  compute();
+}
+
+function modeToggles() {
+  return [
+    el('div', { class: 'planner-label planner-label--sub' }, el('span', { text: t('route.autoModes') })),
+    el('div', { class: 'mode-toggles', role: 'group', 'aria-label': t('route.autoModes') }, MODES.map((mode) => {
+      const allowed = !state.avoid.includes(mode);
+      return el('button', {
+        type: 'button',
+        class: 'mode-toggle',
+        style: `--c:${mapView.ROUTE_MODES[mode].color}`,
+        'aria-pressed': String(allowed),
+        'aria-label': t(`modes.${mode}`),
+        title: t(`modes.${mode}`),
+        onclick: () => toggleAvoid(mode)
+      }, icon(mode));
+    })),
+    state.avoid.length ? el('p', { class: 'planner-hint', text: t('route.autoModesHint') }) : null
+  ];
 }
 
 function renderTrip() {
@@ -1209,7 +1326,159 @@ function renderTrip() {
     el('div', { class: 'trip-row' },
       input,
       base && nights ? el('span', { class: 'trip-row__end', text: t('route.tripEnd', { date: formatDay(addDays(base, nights), true) }) }) : null),
-    missing ? el('p', { class: 'trip-warning' }, icon('alert'), el('span', { text: tCount('route.missingStays', missing) })) : null
+    missing ? el('p', { class: 'trip-warning' }, icon('alert'), el('span', { text: tCount('route.missingStays', missing) })) : null,
+    ...(state.stops.length ? modeToggles() : [])
+  ].filter(Boolean));
+}
+
+function dayLabel(date, day) {
+  return date ? formatDay(date, true) : t('route.day', { n: day + 1 });
+}
+
+function dayRange(plan) {
+  if (plan.arrival) return formatRange(plan.arrival, plan.departure);
+  return t('route.dayRange', { from: plan.day + 1, to: plan.leave + 1 });
+}
+
+function uidPart(value) {
+  return String(value).replace(/[^a-z0-9]+/gi, '-').slice(0, 60);
+}
+
+function stayEvent(source, point, plan) {
+  const place = point.linkName || point.name;
+  const stay = source.chosen ? source.stays.find((item) => item.id === source.chosen) : null;
+  const meta = stay ? [stayName(stay), stay.address].filter(Boolean).join(', ') : t(source.noStay ? 'route.noStayNeeded' : 'route.noStayWarning');
+  const title = t('route.overviewStay', { nights: tCount('route.nights', source.nights), place });
+  return {
+    type: 'stay',
+    icon: stay ? stay.type : 'hotel',
+    when: dayRange(plan),
+    title,
+    meta,
+    warn: !stay && !source.noStay,
+    calendar: plan.arrival ? {
+      uid: `stay-${uidPart(source.id)}-${isoDate(plan.arrival)}`,
+      allDay: true,
+      start: plan.arrival,
+      end: plan.departure,
+      summary: stay ? `${title}: ${stayName(stay)}` : title,
+      description: stay ? [stayName(stay), stay.address, stay.phone, stay.website].filter(Boolean).join('\n') : meta,
+      location: stay ? [stayName(stay), stay.address || place].filter(Boolean).join(', ') : place,
+      geo: stay ? { lat: stay.lat, lon: stay.lon } : { lat: point.lat, lon: point.lon }
+    } : null
+  };
+}
+
+function legEvent(leg, plan) {
+  const result = leg.result && leg.result.status !== 'loading' && leg.result.status !== 'error' ? leg.result : null;
+  const itinerary = result && result.itineraries && result.itineraries[0];
+  const timed = Boolean(itinerary && !Number.isNaN(Date.parse(itinerary.start)) && !Number.isNaN(Date.parse(itinerary.end)));
+  const from = leg.a.linkName || leg.a.name;
+  const to = leg.b.linkName || leg.b.name;
+  const modeName = t(`modes.${leg.mode}`);
+  const duration = result ? formatDuration(result.duration) : null;
+  const meta = [
+    modeName,
+    timed ? `${formatClock(itinerary.start, itinerary.tz)} – ${formatClock(itinerary.end, itinerary.tz)}` : null,
+    duration ? (result.status === 'estimate' ? t('route.approx', { value: duration }) : duration) : t('route.loading'),
+    result ? formatDistance(result.distance) : null
+  ].filter(Boolean).join(' · ');
+  const airports = result && result.airports ? ` (${result.airports[0].iata} → ${result.airports[1].iata})` : '';
+  let calendar = null;
+  if (leg.time) {
+    const start = timed ? new Date(itinerary.start) : leg.time;
+    const end = timed ? new Date(itinerary.end) : new Date(leg.time.getTime() + (result ? result.duration : 3600) * 1000);
+    calendar = {
+      uid: `leg-${uidPart(leg.pair)}-${isoDate(leg.time)}`,
+      utc: timed,
+      start,
+      end,
+      summary: `${modeName}: ${from} → ${to}${airports}`,
+      description: [meta, result && result.status === 'estimate' ? t('route.overviewEstimate') : null, timed ? null : t('route.overviewAssumed')].filter(Boolean).join('\n'),
+      location: from,
+      geo: { lat: leg.a.lat, lon: leg.a.lon }
+    };
+  }
+  return { type: 'leg', icon: leg.mode, color: mapView.ROUTE_MODES[leg.mode].color, when: dayLabel(leg.time, plan.leave), title: `${from} → ${to}${airports}`, meta, calendar };
+}
+
+function tripEvents() {
+  const list = points();
+  const plans = schedule();
+  const legList = legs();
+  const events = [];
+  list.forEach((point, index) => {
+    const plan = plans[index];
+    const source = point.holder ? holder('start') : point.start ? null : state.stops.find((stop) => stop.id === point.key);
+    if (source && source.nights > 0) events.push(stayEvent(source, point, plan));
+    if (legList[index]) events.push(legEvent(legList[index], plan));
+  });
+  if (list.length > 1) {
+    const last = plans[plans.length - 1];
+    events.push({ type: 'end', icon: 'check', when: last.departure ? formatDay(last.departure, true) : t('route.day', { n: last.leave + 1 }), title: t('route.overviewEnd'), meta: null });
+  }
+  return events;
+}
+
+function tripName() {
+  const list = points();
+  if (!list.length) return t('route.title');
+  const name = (point) => point.linkName || point.name;
+  return t('route.calendarName', { from: name(list[0]), to: name(list[list.length - 1]) });
+}
+
+function exportCalendar() {
+  if (!state.tripStart) {
+    toast(t('route.calendarNeedsDate'));
+    return;
+  }
+  const ics = buildIcs(tripName(), tripEvents());
+  downloadFile(`viaro-${state.tripStart}.ics`, ics, 'text/calendar;charset=utf-8');
+  toast(t('route.calendarDone'), { duration: 6000 });
+}
+
+async function shareTrip() {
+  const url = window.location.href.split('#')[0];
+  const text = shareText(`${tripName()} · ${summaryText()}`, tripEvents(), t('route.shareFooter', { url }));
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: tripName(), text });
+      return;
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(t('route.copied'));
+  } catch {
+    toast(t('route.shareFailed'), { type: 'error' });
+  }
+}
+
+function toggleOverview() {
+  state.overviewOpen = !state.overviewOpen;
+  renderList();
+  if (state.overviewOpen) requestAnimationFrame(() => dom.overview.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+}
+
+function renderOverview() {
+  dom.overviewBtn.setAttribute('aria-expanded', String(state.overviewOpen));
+  if (!state.overviewOpen || !state.stops.length) {
+    dom.overview.hidden = true;
+    dom.overview.replaceChildren();
+    return;
+  }
+  dom.overview.hidden = false;
+  dom.overview.replaceChildren(...[
+    el('div', { class: 'planner-label planner-label--row' },
+      el('span', { text: t('route.overview') }),
+      el('button', { type: 'button', class: 'link-btn', text: t('common.close'), onclick: toggleOverview })),
+    overviewList(tripEvents()),
+    el('div', { class: 'overview__actions' },
+      el('button', { type: 'button', class: 'btn btn--secondary btn--small', 'aria-disabled': String(!state.tripStart), onclick: exportCalendar }, icon('calendar'), el('span', { text: t('route.calendar') })),
+      el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: shareTrip }, icon('share'), el('span', { text: t('route.share') }))),
+    state.tripStart ? null : el('p', { class: 'planner-hint', text: t('route.calendarNeedsDate') })
   ].filter(Boolean));
 }
 
@@ -1224,13 +1493,14 @@ function renderList() {
     if (!point.start) rows.push(stopRow(point, index + 1 - offset, plans[index]));
     if (legList[index]) rows.push(legRow(legList[index]));
   });
-  if (list[0] && list[0].start && (legList.length || list[0].holder)) {
+  if (list[0] && list[0].start && legList.length) {
     rows.unshift(startListRow(list[0], plans[0]));
   }
   dom.list.replaceChildren(...rows);
   dom.empty.textContent = state.stops.length ? '' : t('route.empty');
   dom.actions.hidden = !state.stops.length;
   dom.optimize.disabled = list.length < 3;
+  renderOverview();
 }
 
 function render() {
@@ -1250,9 +1520,10 @@ export function refreshStart() {
   const key = user ? `${user.lat.toFixed(3)},${user.lon.toFixed(3)}` : null;
   if (user && key !== state.gpsKey) {
     state.gpsKey = key;
-    reverseGeocode(user.lat, user.lon, getLanguage()).then((name) => {
-      if (name && name !== state.gpsName) {
-        state.gpsName = name;
+    reverseGeocode(user.lat, user.lon, getLanguage()).then((place) => {
+      state.gpsCountry = place.country;
+      if (place.name && place.name !== state.gpsName) {
+        state.gpsName = place.name;
         renderStart();
         renderList();
       }
@@ -1476,13 +1747,16 @@ export function initPlanner(container, opts) {
   dom.list = el('ol', { class: 'route-list' });
   dom.empty = el('p', { class: 'empty empty--compact planner-empty' });
   dom.add = el('section', { class: 'planner-section planner-section--add' });
+  dom.overview = el('section', { class: 'planner-section planner-section--overview', hidden: true });
+  dom.overviewBtn = el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: toggleOverview });
   dom.optimize = el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: optimize });
   dom.clear = el('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: clearRoute });
-  dom.actions = el('div', { class: 'route-actions' }, dom.optimize, dom.clear);
+  dom.actions = el('div', { class: 'route-actions' }, dom.overviewBtn, dom.optimize, dom.clear);
   container.replaceChildren(el('div', { class: 'planner' },
     dom.trip,
     dom.start,
     el('section', { class: 'planner-section planner-section--route' }, dom.list, dom.empty),
+    dom.overview,
     dom.add,
     dom.actions));
   initDrag();
@@ -1522,9 +1796,27 @@ export function renderPlanner() {
         if (addStop(place)) fitRoute();
       }
     }));
+  dom.overviewBtn.replaceChildren(icon('list'), el('span', { text: t('route.overview') }));
   dom.optimize.replaceChildren(icon('sparkle'), el('span', { text: t('route.optimize') }));
   dom.clear.textContent = t('route.clear');
   compute();
+}
+
+export function retryFailed() {
+  let changed = false;
+  for (const [key, result] of Object.entries(state.results)) {
+    if (result.status === 'error') {
+      delete state.results[key];
+      changed = true;
+    }
+  }
+  for (const [key, value] of Object.entries(state.options)) {
+    if (value.status === 'error') {
+      delete state.options[key];
+      changed = true;
+    }
+  }
+  if (changed) compute();
 }
 
 export function hasRoute() {
