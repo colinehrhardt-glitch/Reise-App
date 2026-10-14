@@ -16,6 +16,7 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - „Automatisch wählen aus“: Verkehrsmittel für die automatische Auswahl ausschließen (z. B. keine Flüge); pro Etappe bleiben alle wählbar
 - Unterkunft pro Ort: „Unterkunft suchen“ lädt die Unterkünfte dort, im Popup „Für <Ort> merken“, Merkliste mit Auswahl, Haken „Keine Unterkunft nötig“, Warnhinweis bei Orten ohne Unterkunft; Booking.com-Links mit Check-in/Check-out
 - Routen als Pfeilketten in Reiserichtung; Flüge von Flughafen zu Flughafen (Großkreis), Bus und Bahn von Busbahnhof bzw. Bahnhof, Anfahrt als Punktlinie
+- Busbahnhof bzw. Bahnhof pro Ort wählbar, wenn es mehrere gibt (Auswahl wird gemerkt)
 - Transfers: Anreise von der Unterkunft zum Flughafen/Bahnhof/Busbahnhof und weiter zur nächsten Unterkunft mit Taxi-/Uber-Fahrzeit, Fußweg und Links zu Uber und Bus & Bahn
 - Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen; keine geschätzte Bahn in Ländern ohne Personenzüge (z. B. Kolumbien)
 - Verkehrsmittel je Etappe: Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
@@ -54,4 +55,5 @@ MIT – siehe `LICENSE`.
 - **Ladezeit der Unterkünfte:** Der öffentliche Overpass-Server ist oft ausgelastet (Suchen dauern teils 10–20 s oder werden abgelehnt). Lösung: eigene, wöchentlich aktualisierte Kopie der OSM-Daten statt Live-Abfragen – entweder als fertige Datenpakete über GitHub (kostenlos) oder über den eigenen Server. Ein reiner Weiterleitungs-Server hilft nicht.
 - **Zusatz-Ebenen** (Geld, Einkaufen, Gesundheit, Essen) hängen ebenfalls am Overpass-Server und sollen mit umziehen.
 - **Hostelworld:** Partnerprogramm (partners.hostelworld.com) beantragen; Preise und Bilder nur mit Partner-Zugang und über den Server (Schlüssel nie im Frontend). Bis dahin führt der Button über eine Google-Suche zu Hostelworld.
+- **Rome2Rio:** Zugang zur Routen-API anfragen (Bedingungen und mögliche Kosten klären, sonst Stufe 6). Liefert echte Abfahrtsorte je Busfirma (z. B. Terminal oder eigenes Büro), Fahrzeiten und ungefähre Preise – damit wird die Busbahnhof-Auswahl genauer als die heutige Schätzung aus OSM-Daten. Abfrage nur über den eigenen Server (Schlüssel nie im Frontend), Ergebnis ersetzt `stationEstimate` in `js/planner.js`.
 - **Google-Maps-Karte** wäre mit API-Schlüssel möglich (Kosten, Kreditkarte) – vorerst bei OpenFreeMap geblieben.

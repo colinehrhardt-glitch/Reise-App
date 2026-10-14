@@ -781,9 +781,8 @@ const TERMINAL_NAME = /terminal|rodovi[aá]ria|estaci[oó]n (de )?(autobuses|bus
 const AIRPORT_WEIGHT = { 3: 0.5, 2: 0.85, 1: 1.4 };
 let airportList = null;
 let airportLoad = null;
-const stationCache = new Map(Object.entries(load('stations3', {}) || {}).filter(([, value]) => value));
-remove('stations');
-remove('stations2');
+const stationCache = new Map(Object.entries(load('stations4', {}) || {}).filter(([, value]) => Array.isArray(value) && value.length));
+for (const old of ['stations', 'stations2', 'stations3']) remove(old);
 const stationFailures = new Map();
 const STATION_RETRY = 10 * 60 * 1000;
 
@@ -836,16 +835,25 @@ function stationScore(point, position, tags, type) {
   return terminal ? score : score + 1000;
 }
 
-function bestStation(point, candidates, type) {
-  let best = null;
+const STATION_CHOICES = 6;
+
+function rankStations(point, candidates, type) {
+  const ranked = [];
   for (const { position, tags } of candidates) {
     const name = cleanText(tags.name);
     if (!position || !name) continue;
     const score = stationScore(point, position, tags, type);
     if (score === null) continue;
-    if (!best || score < best.score) best = { score, station: { kind: type === 'bus' ? 'bus_station' : 'train_station', name: name.slice(0, 80), label: shortLabel(name), lat: position.lat, lon: position.lon } };
+    ranked.push({ score, station: { kind: type === 'bus' ? 'bus_station' : 'train_station', name: name.slice(0, 80), label: shortLabel(name), lat: position.lat, lon: position.lon } });
   }
-  return best ? best.station : null;
+  ranked.sort((x, y) => x.score - y.score);
+  const list = [];
+  for (const { station } of ranked) {
+    const duplicate = list.some((other) => roughKm(other, station) < 0.2 || (other.name === station.name && roughKm(other, station) < 1.5));
+    if (!duplicate) list.push(station);
+    if (list.length >= STATION_CHOICES) break;
+  }
+  return list;
 }
 
 async function busStationsFromNominatim(point, signal) {
@@ -870,37 +878,43 @@ function shortLabel(name) {
   return name.length > 22 ? `${name.slice(0, 21)}…` : name;
 }
 
-export async function nearestStation(point, type, signal = null) {
+export async function nearbyStations(point, type, signal = null) {
   const key = `${type}|${point.lat.toFixed(2)},${point.lon.toFixed(2)}`;
   if (stationCache.has(key)) return stationCache.get(key);
-  if (Date.now() - (stationFailures.get(key) || 0) < STATION_RETRY) return null;
+  if (Date.now() - (stationFailures.get(key) || 0) < STATION_RETRY) return [];
   const around = `(around:${STATION_RADIUS[type]},${point.lat.toFixed(5)},${point.lon.toFixed(5)})`;
   const query = `[out:json][timeout:15];(${STATION_FILTERS[type].map((filter) => `${filter}${around};`).join('')});out tags center 40;`;
-  let station = null;
+  let candidates = [];
   let failed = null;
   try {
     const elements = await queryOverpass(query, signal, null, { patient: false, timeout: 10000 });
-    station = bestStation(point, elements.map((element) => ({ position: coordinates(element), tags: element.tags || {} })), type);
+    candidates = elements.map((element) => ({ position: coordinates(element), tags: element.tags || {} }));
   } catch (error) {
     if (error.code === 'aborted') throw error;
     failed = error;
   }
-  if (!station && type === 'bus') {
+  if (type === 'bus' && rankStations(point, candidates, type).length < 2) {
     try {
-      station = bestStation(point, await busStationsFromNominatim(point, signal), type);
+      candidates = candidates.concat(await busStationsFromNominatim(point, signal));
     } catch (error) {
       if (error.code === 'aborted') throw error;
     }
   }
-  if (!station) {
+  const list = rankStations(point, candidates, type);
+  if (!list.length) {
     if (failed) {
       stationFailures.set(key, Date.now());
       throw failed;
     }
-    stationCache.set(key, null);
-    return null;
+    stationCache.set(key, list);
+    return list;
   }
-  stationCache.set(key, station);
-  save('stations3', Object.fromEntries([...stationCache.entries()].filter(([, value]) => value).slice(-120)));
-  return station;
+  stationCache.set(key, list);
+  save('stations4', Object.fromEntries([...stationCache.entries()].filter(([, value]) => value.length).slice(-120)));
+  return list;
+}
+
+export async function nearestStation(point, type, signal = null) {
+  const list = await nearbyStations(point, type, signal);
+  return list[0] || null;
 }

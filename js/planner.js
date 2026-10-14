@@ -1,6 +1,6 @@
 import { t, tCount, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
-import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearestStation } from './api.js';
+import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearbyStations } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
 import { getRecent, addRecent } from './recent.js';
@@ -37,6 +37,7 @@ const state = {
   stops: [],
   modes: {},
   avoid: [],
+  stationChoice: {},
   auto: {},
   results: {},
   options: {},
@@ -120,6 +121,14 @@ function restore() {
   state.stops = Array.isArray(raw.stops) ? raw.stops.map(validStop).filter(Boolean).slice(0, 40) : [];
   state.avoid = Array.isArray(raw.avoid) ? MODES.filter((mode) => raw.avoid.includes(mode)) : [];
   if (state.avoid.length === MODES.length) state.avoid = [];
+  state.stationChoice = {};
+  if (raw.stations && typeof raw.stations === 'object') {
+    for (const [key, value] of Object.entries(raw.stations)) {
+      if (key.length < 60 && value && typeof value.name === 'string' && Number.isFinite(value.lat) && Number.isFinite(value.lon)) {
+        state.stationChoice[key] = { name: value.name.slice(0, 80), lat: value.lat, lon: value.lon };
+      }
+    }
+  }
   state.modes = {};
   if (raw.modes && typeof raw.modes === 'object') {
     for (const [pair, mode] of Object.entries(raw.modes)) {
@@ -135,7 +144,8 @@ function persist() {
     startPlace: state.startPlace,
     stops: state.stops,
     modes: state.modes,
-    avoid: state.avoid
+    avoid: state.avoid,
+    stations: state.stationChoice
   });
   if (!ok) toast(t('favorites.storageError'), { type: 'error', duration: 6000 });
 }
@@ -366,13 +376,61 @@ async function computeFlight(a, b) {
   };
 }
 
+function stationKey(point, type) {
+  return `${type}|${point.lat.toFixed(2)},${point.lon.toFixed(2)}`;
+}
+
+function chosenStation(point, type, list) {
+  const choice = state.stationChoice[stationKey(point, type)];
+  const match = choice ? list.find((station) => Math.abs(station.lat - choice.lat) < 1e-5 && Math.abs(station.lon - choice.lon) < 1e-5) : null;
+  return match || list[0] || null;
+}
+
 async function stationsFor(a, b, type, signal) {
-  const [from, to] = await Promise.all([
-    safely(() => nearestStation(a, type, signal)),
-    safely(() => nearestStation(b, type, signal))
+  const [listA, listB] = await Promise.all([
+    safely(() => nearbyStations(a, type, signal)),
+    safely(() => nearbyStations(b, type, signal))
   ]);
+  const lists = [listA || [], listB || []];
+  const from = chosenStation(a, type, lists[0]);
+  const to = chosenStation(b, type, lists[1]);
   if (!from || !to || distance(from, to) < 2000) return null;
-  return [from, to];
+  return { from, to, choices: { type, lists } };
+}
+
+function chooseStation(point, type, station) {
+  const key = stationKey(point, type);
+  state.stationChoice[key] = { name: station.name, lat: station.lat, lon: station.lon };
+  persist();
+  for (const leg of legs()) {
+    if (stationKey(leg.a, type) !== key && stationKey(leg.b, type) !== key) continue;
+    delete state.options[leg.base];
+    for (const resultKey of Object.keys(state.results)) {
+      if (resultKey.startsWith(`${leg.base}|`)) delete state.results[resultKey];
+    }
+  }
+  compute();
+}
+
+function stationPicker(leg, end) {
+  const choices = leg.result.stationChoices;
+  const index = end === 'depart' ? 0 : 1;
+  const list = choices && choices.lists[index];
+  if (!list || list.length < 2) return null;
+  const point = end === 'depart' ? leg.a : leg.b;
+  const current = leg.result.terminals[index];
+  const label = t(end === 'depart' ? 'route.stationFrom' : 'route.stationTo');
+  const select = el('select', { class: 'select select--compact transfer__select', 'aria-label': label },
+    list.map((station, position) => {
+      const option = el('option', { value: String(position), text: `${station.name} · ${formatDistance(distance(point, station))}` });
+      option.selected = Math.abs(station.lat - current.lat) < 1e-5 && Math.abs(station.lon - current.lon) < 1e-5;
+      return option;
+    }));
+  select.addEventListener('change', () => {
+    const station = list[Number(select.value)];
+    if (station) chooseStation(point, choices.type, station);
+  });
+  return el('label', { class: 'transfer__pick' }, el('span', { class: 'transfer__pick-label', text: label }), select);
 }
 
 async function stationEstimate(a, b, mode, signal, road = null) {
@@ -382,7 +440,7 @@ async function stationEstimate(a, b, mode, signal, road = null) {
     if (mode === 'bus' && road) return { ...busEstimate(road), note: 'route.busNoStation' };
     return null;
   }
-  const [from, to] = stations;
+  const { from, to, choices } = stations;
   const ground = ((distance(a, from) + distance(to, b)) / 1000 / 30) * 3600;
   if (mode === 'bus') {
     const between = await safely(() => routeStreet('car', from, to, signal));
@@ -393,6 +451,7 @@ async function stationEstimate(a, b, mode, signal, road = null) {
       distance: base.distance,
       duration: base.duration * 1.35 + ground,
       note: 'route.busStationNote',
+      stationChoices: choices,
       ...withTerminals(a, b, from, to, between ? between.coords : base.coords)
     };
   }
@@ -402,6 +461,7 @@ async function stationEstimate(a, b, mode, signal, road = null) {
     distance: km * 1250,
     duration: (km * 1.25 / 80) * 3600 + ground,
     note: 'route.trainStationNote',
+    stationChoices: choices,
     ...withTerminals(a, b, from, to, straight(from, to))
   };
 }
@@ -550,6 +610,7 @@ function transferBlock(leg, end) {
   const transit = new URLSearchParams({ api: '1', origin: `${from.lat},${from.lon}`, destination: `${to.lat},${to.lon}`, travelmode: 'transit' });
   return el('div', { class: 'transfer' },
     el('p', { class: 'transfer__title' }, icon(end === 'depart' ? TERMINAL_ICON[terminal.kind] || 'place' : origin.stay ? 'hotel' : 'place'), el('span', { text: title })),
+    stationPicker(leg, end),
     el('p', { class: 'transfer__route', text: `${from.name} → ${to.name}` }),
     rows,
     el('div', { class: 'leg__links-row' },
