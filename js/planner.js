@@ -379,7 +379,7 @@ async function stationEstimate(a, b, mode, signal, road = null) {
   const type = mode === 'train' ? 'train' : 'bus';
   const stations = await stationsFor(a, b, type, signal);
   if (!stations) {
-    if (mode === 'bus' && road) return busEstimate(road);
+    if (mode === 'bus' && road) return { ...busEstimate(road), note: 'route.busNoStation' };
     return null;
   }
   const [from, to] = stations;

@@ -775,12 +775,15 @@ export async function reverseGeocode(lat, lon, lang) {
 }
 
 const AIRPORT_RADIUS = 150;
-const STATION_RADIUS = 15000;
+const STATION_RADIUS = { bus: 25000, train: 15000 };
+const LOCAL_BUS = /parada|urban|transmetro|transmilenio|metrol[ií]nea|megab[uú]s|\bmio\b|\bbrt\b|\bsitp\b/i;
+const TERMINAL_NAME = /terminal|rodovi[aá]ria|estaci[oó]n (de )?(autobuses|buses|bus)|central (de )?autobuses|busbahnhof|\bzob\b|coach station|bus station|gare routi[eè]re|autostazione|dworzec/i;
 const AIRPORT_WEIGHT = { 3: 0.5, 2: 0.85, 1: 1.4 };
 let airportList = null;
 let airportLoad = null;
-const stationCache = new Map(Object.entries(load('stations2', {}) || {}));
+const stationCache = new Map(Object.entries(load('stations3', {}) || {}).filter(([, value]) => value));
 remove('stations');
+remove('stations2');
 const stationFailures = new Map();
 const STATION_RETRY = 10 * 60 * 1000;
 
@@ -816,9 +819,52 @@ export async function nearestAirport(point) {
 }
 
 const STATION_FILTERS = {
-  bus: 'nwr["amenity"="bus_station"]',
-  train: 'nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|miniature|tram)$"]["usage"!="tourism"]["disused"!="yes"]["abandoned"!="yes"]'
+  bus: ['nwr["amenity"="bus_station"]', 'nwr["public_transport"="station"]["bus"="yes"]'],
+  train: ['nwr["railway"="station"]["station"!~"^(subway|light_rail|monorail|funicular|miniature|tram)$"]["usage"!="tourism"]["disused"!="yes"]["abandoned"!="yes"]']
 };
+
+function stationScore(point, position, tags, type) {
+  const name = cleanText(tags.name);
+  let score = roughKm(point, position);
+  if (type === 'train') {
+    if (tags.train === 'yes' || tags.public_transport === 'station') score *= 0.7;
+    return score;
+  }
+  if (LOCAL_BUS.test(name)) return null;
+  const terminal = TERMINAL_NAME.test(name);
+  if (tags.amenity !== 'bus_station' && !terminal) return null;
+  return terminal ? score : score + 1000;
+}
+
+function bestStation(point, candidates, type) {
+  let best = null;
+  for (const { position, tags } of candidates) {
+    const name = cleanText(tags.name);
+    if (!position || !name) continue;
+    const score = stationScore(point, position, tags, type);
+    if (score === null) continue;
+    if (!best || score < best.score) best = { score, station: { kind: type === 'bus' ? 'bus_station' : 'train_station', name: name.slice(0, 80), label: shortLabel(name), lat: position.lat, lon: position.lon } };
+  }
+  return best ? best.station : null;
+}
+
+async function busStationsFromNominatim(point, signal) {
+  const pad = 0.22;
+  const params = new URLSearchParams({
+    q: 'bus station',
+    format: 'jsonv2',
+    limit: '15',
+    bounded: '1',
+    viewbox: [point.lon - pad, point.lat + pad, point.lon + pad, point.lat - pad].map((value) => value.toFixed(5)).join(','),
+    'accept-language': 'en'
+  });
+  await nominatimTurn(signal);
+  const data = await request(`${NOMINATIM_URL}?${params}`, { headers: { Accept: 'application/json' } }, 10000, signal);
+  return (Array.isArray(data) ? data : [])
+    .filter((item) => item.category === 'amenity' && item.type === 'bus_station')
+    .map((item) => ({ position: { lat: Number(item.lat), lon: Number(item.lon) }, tags: { amenity: 'bus_station', name: item.name || String(item.display_name || '').split(',')[0] } }))
+    .filter((item) => Number.isFinite(item.position.lat) && Number.isFinite(item.position.lon));
+}
 
 function shortLabel(name) {
   return name.length > 22 ? `${name.slice(0, 21)}…` : name;
@@ -828,28 +874,33 @@ export async function nearestStation(point, type, signal = null) {
   const key = `${type}|${point.lat.toFixed(2)},${point.lon.toFixed(2)}`;
   if (stationCache.has(key)) return stationCache.get(key);
   if (Date.now() - (stationFailures.get(key) || 0) < STATION_RETRY) return null;
-  const query = `[out:json][timeout:15];${STATION_FILTERS[type]}(around:${STATION_RADIUS},${point.lat.toFixed(5)},${point.lon.toFixed(5)});out tags center 25;`;
-  let elements;
+  const around = `(around:${STATION_RADIUS[type]},${point.lat.toFixed(5)},${point.lon.toFixed(5)})`;
+  const query = `[out:json][timeout:15];(${STATION_FILTERS[type].map((filter) => `${filter}${around};`).join('')});out tags center 40;`;
+  let station = null;
+  let failed = null;
   try {
-    elements = await queryOverpass(query, signal, null, { patient: false, timeout: 9000, single: true });
+    const elements = await queryOverpass(query, signal, null, { patient: false, timeout: 10000 });
+    station = bestStation(point, elements.map((element) => ({ position: coordinates(element), tags: element.tags || {} })), type);
   } catch (error) {
-    if (error.code !== 'aborted') stationFailures.set(key, Date.now());
-    throw error;
+    if (error.code === 'aborted') throw error;
+    failed = error;
   }
-  let best = null;
-  for (const element of elements) {
-    const position = coordinates(element);
-    const tags = element.tags || {};
-    const name = cleanText(tags.name);
-    if (!position || !name) continue;
-    let score = roughKm(point, position);
-    if (type === 'train' && (tags.train === 'yes' || tags.public_transport === 'station')) score *= 0.7;
-    if (type === 'bus' && /terminal|central|rodoviária|terminal de transporte/i.test(name)) score *= 0.7;
-    if (!best || score < best.score) best = { score, station: { kind: type === 'bus' ? 'bus_station' : 'train_station', name: name.slice(0, 80), label: shortLabel(name), lat: position.lat, lon: position.lon } };
+  if (!station && type === 'bus') {
+    try {
+      station = bestStation(point, await busStationsFromNominatim(point, signal), type);
+    } catch (error) {
+      if (error.code === 'aborted') throw error;
+    }
   }
-  const station = best ? best.station : null;
+  if (!station) {
+    if (failed) {
+      stationFailures.set(key, Date.now());
+      throw failed;
+    }
+    stationCache.set(key, null);
+    return null;
+  }
   stationCache.set(key, station);
-  save('stations2', Object.fromEntries([...stationCache.entries()].slice(-120)));
+  save('stations3', Object.fromEntries([...stationCache.entries()].filter(([, value]) => value).slice(-120)));
   return station;
 }
-
