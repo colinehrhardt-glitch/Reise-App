@@ -21,12 +21,12 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - Transport-Vergleich pro Etappe: Auto, zu Fuß, Bus, Bahn, Fähre, Flug mit Dauer, Distanz und Kennzeichnung „Fahrplan“, „Straße“ oder „geschätzt“; Bus/Bahn-Verbindungen zum Abreisetag; Vorschlag aus den gefundenen Verbindungen; keine geschätzte Bahn in Ländern ohne Personenzüge (z. B. Kolumbien)
 - Verkehrsmittel je Etappe: Auto und zu Fuß mit echter Strecke (OSRM, FOSSGIS), Bus/Bahn/Fähre mit Verbindungen über Transitous (wo verfügbar, sonst Schätzung), Flug als Bogenlinie mit geschätzter Flugzeit; Links zu Google Maps, Google Flights und Rome2Rio
 - Reiter „Entdecken“ für den gesuchten Ort, jeden Ort der Route oder die Kartenmitte:
-  - Kurzinfo: zwei Sätze aus Wikipedia (fehlt der Artikel in der eigenen Sprache, automatisch übersetzt über MyMemory), Bildergalerie zum Wischen, „Auf einen Blick“ mit Wetter, Ortszeit, Kurs und Sprache
+  - Kurzinfo: zwei Sätze aus Wikipedia (fehlt der Artikel in der eigenen Sprache, automatisch übersetzt über MyMemory), kleine Bilderleiste zum Wischen mit der Stadt und ihren bekanntesten Orten (antippen für Vollbild), „Auf einen Blick“ mit Wetter, Ortszeit, Kurs und Sprache
   - Wetter (Open-Meteo): jetzt und bis 16 Tage, Aufenthaltstage markiert; für spätere Reisedaten typisches Wetter der letzten 3 Jahre
   - Sehenswürdigkeiten (OpenStreetMap) nach Bekanntheit sortiert (Wikidata), mit Foto, Wikipedia-Text, Filter nach Art und eigener Karten-Ebene; „Für <Ort> merken“ – erscheint am Ort in der Route und im Reiseplan
   - Land & Geld (REST Countries, ExchangeRate-API): Hauptstadt, Sprachen, Währung mit Umrechnung, Vorwahl, Ortszeit, Fahrseite
   - Sicherheit: Diagramm mit der Einschätzung von Deutschland (Auswärtiges Amt), Großbritannien (GOV.UK) und den USA (State Department), Notrufnummern (Wikidata) und „Kurz gesagt“ – die wichtigsten Punkte aus Wikivoyage
-  - Tipps: pro Thema höchstens drei kurze Punkte (Herumkommen, Essen, Ausgehen, Verhalten vor Ort, Gesundheit) aus Wikivoyage, Rückfall auf Englisch mit Übersetzung bzw. die Länderseite
+  - Tipps mit eigenen Reitern: pro Thema höchstens drei kurze Punkte (Herumkommen, Essen, Ausgehen, Verhalten vor Ort, Gesundheit) aus Wikivoyage, Rückfall auf Englisch mit Übersetzung bzw. die Länderseite
   - Sehenswürdigkeiten kommen zuerst schnell aus Wikipedia (Ortssuche), OpenStreetMap ergänzt danach; Land & Geld mit Rückfall auf Wikidata
 - Favoriten (lokal gespeichert), sortierbar und auf der Karte sichtbar
 - Deutsch, Englisch, Spanisch – Hell-, Dunkel- und Automatikmodus
@@ -49,6 +49,7 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/discover.js` – Reiter „Entdecken“
 - `js/info.js` – Abfragen für Wikipedia, Wikivoyage, Wikidata, Open-Meteo, REST Countries, Wechselkurse, Auswärtiges Amt und Sehenswürdigkeiten (mit Cache)
 - `sw.js`, `manifest.webmanifest`, `icons/` – App-Installation und Offline-Start
+- `data/advisories.json` – Reisehinweise aller Länder (Auswärtiges Amt, GOV.UK, US State Department), täglich neu erzeugt von `tools/advisories.py` über GitHub Actions (`.github/workflows/advisories.yml`), weil die Quellen im Browser nicht direkt abrufbar sind
 - `js/ui.js` – gemeinsame Bausteine (Elemente, Symbole, Hinweise)
 - `data/airports.json` – Flughäfen mit Linienverkehr (aus OurAirports, gemeinfrei)
 - `js/i18n.js` – Übersetzungen
