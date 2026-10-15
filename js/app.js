@@ -1555,6 +1555,14 @@ function locateIfAllowed() {
 
 function registerWorker() {
   if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+  const started = Date.now();
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded || !hadController || Date.now() - started > 20000) return;
+    reloaded = true;
+    window.location.reload();
+  });
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 

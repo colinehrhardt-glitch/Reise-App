@@ -1,4 +1,4 @@
-const VERSION = 'viaro-v4';
+const VERSION = 'viaro-v5';
 const SHELL = [
   './',
   'index.html',
@@ -28,12 +28,12 @@ const LIBS = [
   'https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js',
   'https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.3/leaflet-maplibre-gl.js'
 ];
-const NETWORK_WAIT = 4000;
+const NETWORK_WAIT = 7000;
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(VERSION);
-    await cache.addAll(SHELL);
+    await cache.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' })));
     await Promise.all(LIBS.map(async (url) => {
       try {
         const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
@@ -56,7 +56,7 @@ self.addEventListener('activate', (event) => {
 
 async function networkFirst(request) {
   const cache = await caches.open(VERSION);
-  const network = fetch(request).then((response) => {
+  const network = fetch(request, { cache: 'no-cache' }).then((response) => {
     if (response.ok) cache.put(request, response.clone());
     return response;
   });

@@ -45,14 +45,6 @@ async function withCache(name, key, ttl, limit, task) {
   return once(`${name}|${key}`, async () => storeValue(name, key, await task(), limit));
 }
 
-function trimText(value, max) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (text.length <= max) return text;
-  const cut = text.slice(0, max);
-  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
-  return `${end > max * 0.5 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, '')} …`;
-}
-
 function httpsUrl(value) {
   if (typeof value !== 'string') return null;
   const url = value.replace(/^http:\/\//i, 'https://');
@@ -148,7 +140,7 @@ export function shortText(text, count = 2, max = 260) {
     if (result && (result.length + sentence.length > max || sentences(result).length >= count)) break;
     result = result ? `${result} ${sentence}` : sentence;
   }
-  return trimText(result || text, max);
+  return result || list[0] || String(text || '').trim();
 }
 
 async function searchWikipedia(lang, query) {
@@ -527,7 +519,7 @@ function keyPoints(lines, topic, max = 3) {
   const candidates = [];
   lines.paragraphs.forEach((paragraph, pIndex) => {
     sentences(paragraph).forEach((sentence, sIndex) => {
-      if (sentence.length < 25 || sentence.length > 170) return;
+      if (sentence.length < 25 || sentence.length > 170 || /…|\.\.\./.test(sentence)) return;
       const hits = (sentence.match(new RegExp(KEYWORDS[topic].source, 'gi')) || []).length;
       if (!hits) return;
       const score = hits * 2 + (pIndex === 0 ? 0.5 : 0) - sentence.length / 200;
@@ -536,7 +528,7 @@ function keyPoints(lines, topic, max = 3) {
   });
   if (topic !== 'eat' && topic !== 'drink') {
     lines.listings.forEach((item, index) => {
-      if (item.text.length > 150 || item.text.length < 25) return;
+      if (item.text.length > 150 || item.text.length < 25 || /…|\.\.\./.test(item.text)) return;
       const hits = (item.text.match(new RegExp(KEYWORDS[topic].source, 'gi')) || []).length;
       if (hits) candidates.push({ sentence: item.text, score: hits * 1.5, order: 10000 + index });
     });
@@ -551,7 +543,7 @@ function keyPoints(lines, topic, max = 3) {
     }
   }
   if (!points.length) {
-    const first = lines.paragraphs.flatMap((paragraph) => sentences(paragraph)).find((sentence) => sentence.length >= 25 && sentence.length <= 200);
+    const first = lines.paragraphs.flatMap((paragraph) => sentences(paragraph)).find((sentence) => sentence.length >= 25 && sentence.length <= 200 && !/…|\.\.\./.test(sentence));
     if (first) points.push(first);
   }
   return points;
@@ -599,7 +591,8 @@ async function translatePoints(points, from, to) {
   const list = await Promise.all(points.map(async (point) => {
     if (typeof point !== 'string') return point;
     const result = await translated(point, from, to);
-    if (result.translated) done = true;
+    if (!result.translated || /…|\.\.\./.test(result.text)) return point;
+    done = true;
     return result.text;
   }));
   return { points: list, translated: done };
