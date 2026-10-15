@@ -24,6 +24,7 @@ const dom = {};
 const state = {
   places: [],
   poi: {},
+  poiRun: {},
   searched: false,
   filter: 'all',
   origin: null,
@@ -350,10 +351,12 @@ async function loadPoiLayer(category, area = null, signal = null) {
     return;
   }
   const bounds = area || mapView.getBounds();
+  const run = (state.poiRun[category] || 0) + 1;
+  state.poiRun[category] = run;
   beginRequest();
   try {
     const data = await fetchCategories([category], bounds, { signal });
-    if (signal && signal.aborted) return;
+    if ((signal && signal.aborted) || state.poiRun[category] !== run) return;
     state.poi[category] = data[category].items;
     renderPoi(category);
     if (data[category].truncated) truncatedNotice();
@@ -551,9 +554,13 @@ function toggleFavorite(place) {
   const previous = state.favorites[place.id];
   if (previous) delete state.favorites[place.id];
   else state.favorites[place.id] = toFavorite(place);
-  const stored = persistFavorites();
+  if (!persistFavorites()) {
+    if (previous) state.favorites[place.id] = previous;
+    else delete state.favorites[place.id];
+    syncFavoriteViews(place.id);
+    return;
+  }
   syncFavoriteViews(place.id, true);
-  if (!stored) return;
   if (previous) {
     toast(t('favorites.removed'), {
       action: {
@@ -660,6 +667,7 @@ function refreshOpenPopup() {
 }
 
 async function findStayFor(stop) {
+  state.searchToken += 1;
   setTab('stays', { fit: false });
   mapView.closePopup();
   const result = { lat: stop.lat, lon: stop.lon, kind: 'city', rank: 16, name: stop.name, bounds: null };
@@ -910,6 +918,7 @@ async function showSight(item) {
 function openItemPopup(item) {
   hideSearchPanel();
   toggleLayers(false);
+  if (!wideQuery.matches && state.sheet !== 'peek' && dom.sheet.getBoundingClientRect().top - dom.areaBtn.getBoundingClientRect().bottom < 300) setSheet('peek');
   mapView.openPopup(item, contentFor(item));
   state.popupItem = item;
 }
@@ -964,11 +973,14 @@ function renderLoading(areaName) {
 async function loadPoiLayers(bounds, signal) {
   const categories = POI_CATEGORIES.filter((key) => state.layers[key]);
   if (!categories.length || signal.aborted) return;
+  const runs = Object.fromEntries(categories.map((category) => [category, (state.poiRun[category] || 0) + 1]));
+  Object.assign(state.poiRun, runs);
   beginRequest();
   try {
     const data = await fetchCategories(categories, bounds, { signal });
     if (signal.aborted) return;
     for (const category of categories) {
+      if (state.poiRun[category] !== runs[category]) continue;
       state.poi[category] = data[category].items;
       renderPoi(category);
     }
@@ -1141,6 +1153,7 @@ function renderRecentChips() {
 }
 
 async function chooseSearchResult(result) {
+  const token = ++state.searchToken;
   hideSearchPanel();
   addRecent(result);
   state.areaCountry = result.country || null;
@@ -1159,6 +1172,7 @@ async function chooseSearchResult(result) {
     return;
   }
   await moving;
+  if (token !== state.searchToken) return;
   if (mapView.getZoom() >= MIN_SEARCH_ZOOM) searchArea({ areaName: result.name });
   else toast(t('search.zoomHint'), { duration: 5000 });
 }
@@ -1237,7 +1251,8 @@ function sheetPositions() {
   const height = dom.sheet.offsetHeight;
   const safe = parseFloat(getComputedStyle(dom.sheet).paddingBottom) || 0;
   const peekVisible = dom.sheetHeader.offsetHeight + dom.sheetTabs.offsetHeight + dom.chips.offsetHeight + safe;
-  const halfVisible = Math.max(peekVisible + 80, Math.round(window.innerHeight * 0.48));
+  const room = window.innerHeight - dom.areaBtn.getBoundingClientRect().bottom - 168;
+  const halfVisible = Math.max(peekVisible, Math.min(Math.max(peekVisible + 80, Math.round(window.innerHeight * 0.48)), room));
   return {
     full: 0,
     half: Math.max(0, height - halfVisible),
@@ -1323,6 +1338,19 @@ function initSheet() {
   };
   dom.sheetHeader.addEventListener('pointerup', finish);
   dom.sheetHeader.addEventListener('pointercancel', finish);
+  dom.sheetHeader.addEventListener('click', (event) => {
+    if (event.detail === 0) cycleSheet();
+  });
+  if ('ResizeObserver' in window) {
+    let sizes = '';
+    const observer = new ResizeObserver(() => {
+      const next = [dom.sheetHeader.offsetHeight, dom.sheetTabs.offsetHeight, dom.chips.offsetHeight].join('|');
+      if (next === sizes) return;
+      sizes = next;
+      if (!drag) setSheet(state.sheet, false);
+    });
+    [dom.sheetHeader, dom.sheetTabs, dom.chips].forEach((node) => observer.observe(node));
+  }
   dom.sheetHeader.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -1368,12 +1396,16 @@ function renderAll() {
   renderSources();
   renderAttribution();
   if (!dom.layers.hidden) renderLayersPanel();
-  renderResults();
+  if (state.areaLoading) renderLoading(state.areaName);
+  else renderResults();
   renderFavoritesList();
   updateAreaButton();
 }
 
 function bindEvents() {
+  dom.sheet.addEventListener('focusin', (event) => {
+    if (!wideQuery.matches && state.sheet !== 'full' && event.target.matches('input[type="search"], input[type="text"]')) setSheet('full');
+  });
   dom.searchForm.addEventListener('submit', handleSearch);
   dom.searchInput.addEventListener('input', () => {
     updateClearButton();
@@ -1392,7 +1424,10 @@ function bindEvents() {
     dom.searchInput.focus();
     showRecent();
   });
-  dom.areaBtn.addEventListener('click', () => searchArea());
+  dom.areaBtn.addEventListener('click', () => {
+    state.searchToken += 1;
+    searchArea();
+  });
   dom.tabStays.addEventListener('click', () => setTab('stays'));
   dom.tabRoute.addEventListener('click', () => setTab('route'));
   dom.tabDiscover.addEventListener('click', () => setTab('discover'));
@@ -1445,6 +1480,7 @@ function bindEvents() {
   window.addEventListener('online', () => {
     toast(t('common.online'), { duration: 3000 });
     retryFailed();
+    if (state.loadFailed && !state.areaLoading) state.loadFailed();
   });
   onLanguageChange(() => {
     renderAll();
@@ -1469,7 +1505,7 @@ function collectDom() {
     resultsSort: 'results-sort', resultsEmpty: 'results-empty', recent: 'recent', resultsList: 'results-list', scrim: 'scrim', drawer: 'drawer',
     drawerClose: 'drawer-close', menuBtn: 'menu-btn', favoritesCount: 'favorites-count', favoritesToggle: 'favorites-toggle',
     favoritesSort: 'favorites-sort', favoritesEmpty: 'favorites-empty', favoritesList: 'favorites-list',
-    languageSwitch: 'language-switch', themeSwitch: 'theme-switch', sources: 'sources', toasts: 'toasts'
+    languageSwitch: 'language-switch', themeSwitch: 'theme-switch', sources: 'sources'
   };
   for (const [key, id] of Object.entries(ids)) dom[key] = document.getElementById(id);
 }

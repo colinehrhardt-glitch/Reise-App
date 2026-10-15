@@ -22,8 +22,10 @@ function cachedValue(name, key, ttl) {
   return undefined;
 }
 
-function storeValue(name, key, value, limit) {
-  const entry = { time: Date.now(), value };
+const RETRY_SOON = 30 * 60 * 1000;
+
+function storeValue(name, key, value, limit, ttl = 0, degraded = false) {
+  const entry = { time: degraded ? Date.now() - ttl + RETRY_SOON : Date.now(), value };
   memory.set(`${name}|${key}`, entry);
   const store = readBucket(name);
   store[key] = entry;
@@ -42,7 +44,13 @@ function once(key, task) {
 async function withCache(name, key, ttl, limit, task) {
   const hit = cachedValue(name, key, ttl);
   if (hit !== undefined) return hit;
-  return once(`${name}|${key}`, async () => storeValue(name, key, await task(), limit));
+  return once(`${name}|${key}`, async () => {
+    let degraded = false;
+    const value = await task(() => {
+      degraded = true;
+    });
+    return storeValue(name, key, value, limit, ttl, degraded);
+  });
 }
 
 function httpsUrl(value) {
@@ -107,10 +115,18 @@ export async function translateText(text, from, to) {
       const data = await request(`https://api.mymemory.translated.net/get?${params}`, {}, 10000);
       const value = data && data.responseData && data.responseData.translatedText;
       if (!value || Number(data.responseStatus) !== 200 || /MYMEMORY WARNING|QUERY LENGTH LIMIT/i.test(value)) throw new ApiError('server');
-      translated.push(value);
+      translated.push(decodeEntities(value));
     }
     return translated.join(' ');
   });
+}
+
+function decodeEntities(value) {
+  const named = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+  return String(value)
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&(amp|quot|apos|lt|gt|nbsp);/g, (_, name) => named[name]);
 }
 
 async function translated(text, from, to) {
@@ -141,6 +157,16 @@ export function shortText(text, count = 2, max = 260) {
     result = result ? `${result} ${sentence}` : sentence;
   }
   return result || list[0] || String(text || '').trim();
+}
+
+function plainName(value) {
+  return plainText(String(value || '').replace(/\s*\([^)]*\)/g, '')).trim();
+}
+
+function sameName(title, name) {
+  const a = plainName(title);
+  const b = plainName(name);
+  return Boolean(a && b) && (a.includes(b) || b.includes(a));
 }
 
 async function searchWikipedia(lang, query) {
@@ -200,30 +226,31 @@ export async function fetchGallery(lang, title, limit = 8) {
 
 export async function fetchSummary(place, lang) {
   const key = `${lang}|${place.wikidata || `${place.name}|${place.lat.toFixed(2)},${place.lon.toFixed(2)}`}`;
-  return withCache('summary2', key, 7 * DAY, 20, async () => {
+  return withCache('summary2', key, 7 * DAY, 20, async (degrade) => {
     let title = null;
     let wikiLang = lang;
     let description = null;
     if (place.wikidata) {
       const links = await wikidataLinks(place.wikidata);
       description = links.descriptions[lang] || null;
-      title = links.wiki[lang] || null;
-      if (!title && links.wiki.en) {
-        title = links.wiki.en;
-        wikiLang = 'en';
-      }
+      wikiLang = [lang, 'en', 'es', 'de'].find((item) => links.wiki[item]) || lang;
+      title = links.wiki[wikiLang] || null;
+      if (!title) return null;
+    } else {
+      title = await searchWikipedia(lang, [place.name, place.countryName].filter(Boolean).join(' '));
+      if (!title || !sameName(title, place.name)) return null;
     }
-    if (!title) title = await searchWikipedia(lang, [place.name, place.countryName].filter(Boolean).join(' '));
-    if (!title) return null;
     const summary = await wikipediaSummary(wikiLang, title);
     if (!summary) return null;
     const short = shortText(summary.extract, 2, 260);
     const text = await translated(short, wikiLang, lang);
+    if (text.foreign) degrade();
     let gallery = [];
     try {
       gallery = await fetchGallery(wikiLang, summary.title);
     } catch (error) {
       if (error.code === 'offline') throw error;
+      degrade();
     }
     const images = [summary.image ? { src: summary.image, link: summary.url, credit: 'Wikipedia' } : null, ...gallery].filter(Boolean)
       .filter((image, index, all) => all.findIndex((other) => other.src === image.src) === index);
@@ -234,7 +261,7 @@ export async function fetchSummary(place, lang) {
 
 export async function fetchSightSummary(item, lang) {
   const key = `${lang}|${item.wikidata || item.wikiTitle || item.id}`;
-  return withCache('sightSummary2', key, 7 * DAY, 40, async () => {
+  return withCache('sightSummary2', key, 7 * DAY, 40, async (degrade) => {
     let wikiLang = null;
     let title = null;
     if (item.wikiTitle && item.wikiLang) {
@@ -255,11 +282,13 @@ export async function fetchSightSummary(item, lang) {
     const summary = await wikipediaSummary(wikiLang, title);
     if (!summary) return null;
     const text = await translated(shortText(summary.extract, 2, 240), wikiLang, lang);
+    if (text.foreign) degrade();
     let gallery = [];
     try {
       gallery = await fetchGallery(wikiLang, summary.title, 6);
     } catch (error) {
       if (error.code === 'offline') throw error;
+      degrade();
     }
     return { text: text.text, translated: text.translated, url: summary.url, images: gallery };
   });
@@ -318,13 +347,14 @@ async function countryFromWikidata(id, lang) {
 export async function fetchCountry(code, lang = 'en') {
   const id = String(code || '').toLowerCase();
   if (!/^[a-z]{2}$/.test(id)) throw new ApiError('server');
-  return withCache('country2', `${id}|${lang}`, 30 * DAY, 30, async () => {
+  return withCache('country2', `${id}|${lang}`, 30 * DAY, 30, async (degrade) => {
     let base = null;
     try {
       base = await countryFromRest(id);
     } catch (error) {
       if (error.code === 'offline') throw error;
       base = await countryFromWikidata(id, lang);
+      degrade();
     }
     return { code: id, names: Object.fromEntries(LANGS.map((item) => [item, countryName(id, item)])), ...base };
   });
@@ -403,7 +433,7 @@ async function bundledAdvice(id) {
 }
 
 function plainText(value) {
-  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/ß/g, 'ss');
 }
 
 function escapeRegExp(value) {
@@ -456,12 +486,17 @@ export async function fetchPlaceAdvisories(place) {
   if (!/^[a-z]{2}$/.test(id)) return { scope: 'none', items: [] };
   const [country, areas] = await Promise.all([fetchAdvisories(id), areaFile(id)]);
   const countryNames = LANGS.map((lang) => plainText(countryName(id, lang))).filter(Boolean);
+  const labels = new Map();
   const names = [place.name, ...String(place.detail || '').split(',')]
-    .map((item) => plainText(item).replace(/\b(departamento|department|province|provincia|region|region de|estado|state|municipio)\b/g, '').trim())
+    .map((item) => {
+      const key = plainText(item).replace(/\b(departamento|department|province|provincia|region|region de|estado|state|municipio)\b/g, '').trim();
+      if (key && !labels.has(key)) labels.set(key, String(item).trim());
+      return key;
+    })
     .filter((item, index, all) => item.length >= 4 && !/\d/.test(item) && !countryNames.includes(item) && all.indexOf(item) === index);
   const items = country.map((item) => {
     const local = localLevel(item.id, item.level, areas, names);
-    return { ...item, countryLevel: item.level, level: local.level, match: local.match, city: Boolean(local.city), known: local.known };
+    return { ...item, countryLevel: item.level, level: local.level, match: local.match ? labels.get(local.match) || local.match : null, city: Boolean(local.city), known: local.known };
   });
   const scoped = items.some((item) => item.known);
   const hit = items.find((item) => item.match && item.city) || items.find((item) => item.match);
@@ -610,7 +645,7 @@ async function guideFor(lang, title, keys, failures) {
 
 export async function fetchGuide(place, lang) {
   const key = `${lang}|${place.wikidata || `${place.name}|${place.lat.toFixed(1)},${place.lon.toFixed(1)}`}`;
-  return withCache('guide3', key, 7 * DAY, 10, async () => {
+  return withCache('guide3', key, 7 * DAY, 10, async (degrade) => {
     const links = place.wikidata ? await wikidataLinks(place.wikidata).catch(() => ({ voyage: {} })) : { voyage: {} };
     const keys = Object.keys(GUIDE_SECTIONS);
     const sources = [];
@@ -623,6 +658,7 @@ export async function fetchGuide(place, lang) {
       if (english) sources.push(english);
     }
     if (!sources.length && failures.length) throw failures[0];
+    if (failures.length) degrade();
     if (!sources.length) return null;
     const sections = {};
     for (const item of keys) {
@@ -630,6 +666,7 @@ export async function fetchGuide(place, lang) {
       if (!source) continue;
       const section = source.sections[item];
       const result = await translatePoints(section.points, source.lang, lang);
+      if (source.lang !== lang && !result.translated) degrade();
       sections[item] = { points: result.points, translated: result.translated, url: section.url, source: source.title };
     }
     return { title: sources[0].title, url: sources[0].url, sections };
@@ -779,7 +816,7 @@ export function mergeSights(...groups) {
   return merged;
 }
 
-async function rankSights(items, lang) {
+async function rankSights(items, lang, degrade = () => {}) {
   const ids = [...new Set(items.filter((item) => item.wikidata).map((item) => item.wikidata))].slice(0, 180);
   if (ids.length) {
     try {
@@ -802,6 +839,7 @@ async function rankSights(items, lang) {
       }
     } catch (error) {
       if (error.code === 'offline') throw error;
+      degrade();
     }
   }
   return items.sort((a, b) => b.popularity - a.popularity || a.name.localeCompare(b.name)).slice(0, 80);
@@ -809,7 +847,7 @@ async function rankSights(items, lang) {
 
 export async function fetchSights(place, lang, radius, { onPartial = null } = {}) {
   const key = `${lang}|${place.lat.toFixed(2)},${place.lon.toFixed(2)}|${Math.round(radius / 1000)}`;
-  return withCache('sights2', key, DAY, 6, async () => {
+  return withCache('sights2', key, DAY, 6, async (degrade) => {
     const osm = osmSights(place, radius).then((value) => ({ ok: true, value }), (error) => ({ ok: false, error }));
     const wiki = Promise.all([
       wikiSights(place, lang, radius).catch((error) => (error.code === 'offline' ? Promise.reject(error) : [])),
@@ -825,7 +863,8 @@ export async function fetchSights(place, lang, radius, { onPartial = null } = {}
     }
     const full = await osm;
     if (!full.ok && !quick.length) throw full.error;
-    return rankSights(mergeSights(quick, full.ok ? full.value : []), lang);
+    if (!full.ok) degrade();
+    return rankSights(mergeSights(quick, full.ok ? full.value : []), lang, degrade);
   });
 }
 

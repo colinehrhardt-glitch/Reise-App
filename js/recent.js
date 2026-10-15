@@ -26,6 +26,7 @@ function valid(raw) {
     rank: finite(raw.rank),
     importance: finite(raw.importance),
     country: typeof raw.country === 'string' && /^[a-z]{2}$/.test(raw.country) ? raw.country : null,
+    wikidata: typeof raw.wikidata === 'string' && /^Q\d+$/.test(raw.wikidata) ? raw.wikidata : null,
     bounds: validBounds(raw.bounds)
   };
 }

@@ -1,6 +1,6 @@
 import { t, tCount, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
-import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearbyStations } from './api.js';
+import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearbyStations, shortLabel } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
 import { getRecent, addRecent } from './recent.js';
@@ -15,6 +15,7 @@ const DEFAULT_NIGHTS = 2;
 const MAX_NIGHTS = 90;
 const MAX_STAYS = 12;
 const MAX_SIGHTS = 30;
+const MAX_STOPS = 40;
 const STAY_RADIUS = 30000;
 const TARGET_RADIUS = 60000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -53,6 +54,7 @@ const state = {
   gpsCountry: null,
   gpsKey: null,
   locating: false,
+  dragging: false,
   startEditing: false,
   overviewOpen: false,
   sightsOpen: null
@@ -68,7 +70,7 @@ function validPlace(raw) {
   if (!raw || !Number.isFinite(raw.lat) || !Number.isFinite(raw.lon)) return null;
   return {
     id: typeof raw.id === 'string' ? raw.id.slice(0, 40) : newId(),
-    name: text(raw.name) || '?',
+    name: text(raw.name) || t('route.unnamed'),
     detail: text(raw.detail),
     country: typeof raw.country === 'string' && /^[a-z]{2}$/.test(raw.country) ? raw.country : null,
     wikidata: typeof raw.wikidata === 'string' && /^Q\d+$/.test(raw.wikidata) ? raw.wikidata : null,
@@ -326,7 +328,7 @@ function terminalFromPart(part, end, kind) {
   const point = end === 'from' ? part.coords[0] : part.coords[part.coords.length - 1];
   if (!point) return null;
   const name = (end === 'from' ? part.from : part.to) || '';
-  return { kind, name, label: name.length > 22 ? `${name.slice(0, 21)}…` : name, lat: point[0], lon: point[1] };
+  return { kind, name, label: shortLabel(name), lat: point[0], lon: point[1] };
 }
 
 function transitResult(itineraries, a, b, mode) {
@@ -500,16 +502,27 @@ function busEstimate(road) {
   return { status: 'estimate', distance: road.distance, duration: road.duration * 1.35, coords: road.coords, note: 'route.estimateNote' };
 }
 
+async function roadOrError(a, b, signal) {
+  try {
+    return { road: await routeStreet('car', a, b, signal), error: null };
+  } catch (error) {
+    if (error.code === 'aborted') throw error;
+    return { road: null, error };
+  }
+}
+
 async function computeOptions(leg, signal) {
   const { a, b, time } = leg;
   const km = distance(a, b) / 1000;
   const found = new Map();
-  const [walk, road, itineraries, flight] = await Promise.all([
+  const [walk, roadResult, itineraries, flight] = await Promise.all([
     km <= 12 ? safely(() => routeStreet('walk', a, b, signal)) : null,
-    safely(() => routeStreet('car', a, b, signal)),
+    roadOrError(a, b, signal),
     km >= 1 ? safely(() => routeTransit('all', a, b, signal, time)) : null,
     km >= 250 ? computeFlight(a, b) : null
   ]);
+  const road = roadResult.road;
+  const noRoad = !road && roadResult.error && roadResult.error.code === 'noroute';
   if (walk) found.set('walk', { status: 'ok', distance: walk.distance, duration: walk.duration, coords: walk.coords });
   if (road) found.set('car', { status: 'ok', distance: road.distance, duration: road.duration, coords: road.coords });
   const groups = {};
@@ -528,11 +541,12 @@ async function computeOptions(leg, signal) {
   ]);
   if (bus) found.set('bus', bus);
   if (train) found.set('train', train);
-  if (!found.has('ferry') && !road && km < 600) found.set('ferry', ferryEstimate(a, b));
+  if (!found.has('ferry') && noRoad && km < 600) found.set('ferry', ferryEstimate(a, b));
   if (!found.has('flight')) {
     if (flight) found.set('flight', flight);
-    else if (!road && km >= 600) found.set('flight', await computeFlight(a, b));
+    else if (noRoad && km >= 600) found.set('flight', await computeFlight(a, b));
   }
+  if (!road && !noRoad && !found.size) throw roadResult.error;
   return MODES.filter((mode) => found.has(mode))
     .map((mode) => ({ mode, ...found.get(mode) }))
     .sort((x, y) => x.duration - y.duration);
@@ -655,7 +669,8 @@ async function computeLeg(leg, signal) {
   }
   if (itineraries.length) return transitResult(itineraries, a, b, mode);
   if (mode === 'ferry') return ferryEstimate(a, b);
-  const road = await safely(() => routeStreet('car', a, b, signal));
+  const { road, error } = await roadOrError(a, b, signal);
+  if (!road && error && error.code !== 'noroute') throw error;
   if (!road && !state.modes[pair]) {
     state.auto[pair] = firstAllowed(km < 500 ? ['ferry', 'flight'] : ['flight', 'ferry']);
     return { status: 'switch' };
@@ -772,11 +787,11 @@ function totals() {
   let seconds = 0;
   let estimated = false;
   let pending = false;
-  let failed = false;
+  let failed = 0;
   for (const leg of list) {
     const result = leg.result;
     if (!result || result.status === 'loading') pending = true;
-    else if (result.status === 'error') failed = true;
+    else if (result.status === 'error') failed += 1;
     else {
       meters += result.distance;
       seconds += result.duration;
@@ -804,12 +819,14 @@ export function summaryText() {
   const nightsText = nights ? ` · ${tCount('route.nights', nights)}` : '';
   if (!total.count) return state.stops.length ? `${t('route.needStart')}${nightsText}` : '';
   if (total.pending) return t('route.loading');
+  const failedText = total.failed ? ` · ${tCount('route.failedLegs', total.failed)}` : '';
+  if (total.failed === total.count) return `${tCount('route.failedLegs', total.failed)}${nightsText}`;
   const duration = formatDuration(total.seconds);
   return t('route.summary', {
     legs: tCount('route.legs', total.count),
     distance: formatDistance(total.meters),
     duration: total.estimated ? t('route.approx', { value: duration }) : duration
-  }) + nightsText;
+  }) + failedText + nightsText;
 }
 
 function renderSummary() {
@@ -836,7 +853,8 @@ function renderMap() {
     const stay = stop.stays.find((item) => item.id === stop.chosen);
     return stay ? { lat: stay.lat, lon: stay.lon, name: stay.name || t('place.unnamed'), stop: stop.name, item: stay } : null;
   }).filter(Boolean);
-  mapView.renderRoute(mapPoints, mapLegs, state.expanded, stays);
+  const selected = legs().findIndex((leg) => leg.pair === state.expanded);
+  mapView.renderRoute(mapPoints, mapLegs, selected >= 0 ? selected : null, stays);
 }
 
 export function fitRoute() {
@@ -874,7 +892,7 @@ function makeSearch({ placeholder, onPick, compact = false }) {
     message.textContent = '';
     showingRecent = false;
     addRecent(result);
-    onPick({ name: result.name, detail: result.detail, lat: result.lat, lon: result.lon, country: result.country });
+    onPick({ name: result.name, detail: result.detail, lat: result.lat, lon: result.lon, country: result.country, wikidata: result.wikidata });
   };
   const hit = (result, iconName) => el('li', {},
     el('button', { type: 'button', class: 'search-hit', onclick: () => pick(result) },
@@ -957,15 +975,25 @@ async function useGps() {
   }
 }
 
+function resetStartModes() {
+  for (const store of [state.modes, state.auto]) {
+    for (const pair of Object.keys(store)) {
+      if (pair.startsWith('start>')) delete store[pair];
+    }
+  }
+}
+
 function renderStart() {
   const listed = state.stops.length > 0;
   const point = startPoint();
   if (listed && point && !state.startEditing && !state.locating) {
+    dom.startView = null;
     dom.start.hidden = true;
     dom.start.replaceChildren();
     return;
   }
   dom.start.hidden = false;
+  if (!(state.startMode === 'custom' && (!state.startPlace || (listed && point)))) dom.startView = null;
   const segment = (mode, label) => el('button', {
     type: 'button',
     class: 'segmented__btn',
@@ -992,16 +1020,21 @@ function renderStart() {
   } else if (state.startPlace && !editing) {
     body = startRow(point, () => {
       state.startPlace = null;
+      resetStartModes();
       persist();
       update();
     });
   } else {
+    const view = `search|${listed && point ? 'done' : ''}`;
+    if (dom.startView === view && dom.start.querySelector('.planner-search')) return;
+    dom.startView = view;
     body = makeSearch({
       placeholder: t('route.startSearch'),
       compact: true,
       onPick: (place) => {
         state.startPlace = validStop({ ...place, id: 'start', nights: 0 });
         state.startEditing = false;
+        resetStartModes();
         persist();
         update();
         fitRoute();
@@ -1041,27 +1074,43 @@ function modeButton(leg) {
     type: 'button',
     class: 'leg__mode',
     style: `--c:${color}`,
-    'aria-expanded': String(state.picker === leg.index),
+    'aria-expanded': String(state.picker === leg.pair),
     'aria-label': `${t('route.mode')}: ${t(`modes.${leg.mode}`)}`,
     onclick: () => {
-      state.picker = state.picker === leg.index ? null : leg.index;
+      state.picker = state.picker === leg.pair ? null : leg.pair;
       renderList();
     }
   }, icon(leg.mode), el('span', { text: t(`modes.${leg.mode}`) }));
 }
 
 function modePicker(leg) {
+  const manual = Boolean(state.modes[leg.pair]);
   return el('div', { class: 'leg__picker', role: 'group', 'aria-label': t('route.mode') },
+    el('button', {
+      type: 'button',
+      class: 'mode-option mode-option--auto',
+      style: '--c:var(--accent)',
+      'aria-pressed': String(!manual),
+      onclick: () => {
+        delete state.modes[leg.pair];
+        delete state.auto[leg.pair];
+        state.picker = null;
+        state.expanded = leg.pair;
+        persist();
+        reapplyAuto();
+        compute();
+      }
+    }, icon('sparkle'), el('span', { text: t('route.autoMode') })),
     MODES.map((mode) => el('button', {
       type: 'button',
       class: 'mode-option',
       style: `--c:${mapView.ROUTE_MODES[mode].color}`,
-      'aria-pressed': String(leg.mode === mode),
+      'aria-pressed': String(manual && leg.mode === mode),
       onclick: () => {
         state.modes[leg.pair] = mode;
         delete state.auto[leg.pair];
         state.picker = null;
-        state.expanded = leg.index;
+        state.expanded = leg.pair;
         persist();
         compute();
       }
@@ -1206,7 +1255,7 @@ function legDetails(leg) {
 }
 
 function legRow(leg) {
-  const expanded = state.expanded === leg.index;
+  const expanded = state.expanded === leg.pair;
   return el('li', { class: `leg${expanded ? ' is-expanded' : ''}`, style: `--c:${mapView.ROUTE_MODES[leg.mode].color}`, 'data-leg': leg.index },
     el('div', { class: 'leg__rail', 'aria-hidden': 'true' }),
     el('div', { class: 'leg__body' },
@@ -1217,13 +1266,13 @@ function legRow(leg) {
           class: 'leg__summary',
           'aria-expanded': String(expanded),
           onclick: () => {
-            state.expanded = expanded ? null : leg.index;
+            state.expanded = expanded ? null : leg.pair;
             if (!expanded) fitLeg(leg);
             renderList();
             renderMap();
           }
         }, legInfo(leg), icon('chevron'))),
-      state.picker === leg.index ? modePicker(leg) : null,
+      state.picker === leg.pair ? modePicker(leg) : null,
       expanded ? legDetails(leg) : null));
 }
 
@@ -1469,7 +1518,7 @@ function stayEvent(source, point, plan) {
   };
 }
 
-function legEvent(leg, plan) {
+function legEvent(leg, plan, after = null) {
   const result = leg.result && leg.result.status !== 'loading' && leg.result.status !== 'error' ? leg.result : null;
   const itinerary = result && result.itineraries && result.itineraries[0];
   const timed = Boolean(itinerary && !Number.isNaN(Date.parse(itinerary.start)) && !Number.isNaN(Date.parse(itinerary.end)));
@@ -1480,14 +1529,15 @@ function legEvent(leg, plan) {
   const meta = [
     modeName,
     timed ? `${formatClock(itinerary.start, itinerary.tz)} – ${formatClock(itinerary.end, itinerary.tz)}` : null,
-    duration ? (result.status === 'estimate' ? t('route.approx', { value: duration }) : duration) : t('route.loading'),
+    duration ? (result.status === 'estimate' ? t('route.approx', { value: duration }) : duration) : leg.result && leg.result.status === 'error' ? t('route.error') : t('route.loading'),
     result ? formatDistance(result.distance) : null
   ].filter(Boolean).join(' · ');
   const airports = result && result.airports ? ` (${result.airports[0].iata} → ${result.airports[1].iata})` : '';
   let calendar = null;
+  let start = null;
   if (leg.time) {
-    const start = timed ? new Date(itinerary.start) : leg.time;
-    const end = timed ? new Date(itinerary.end) : new Date(leg.time.getTime() + (result ? result.duration : 3600) * 1000);
+    start = timed ? new Date(itinerary.start) : after && after > leg.time ? after : leg.time;
+    const end = timed ? new Date(itinerary.end) : new Date(start.getTime() + (result ? result.duration : 3600) * 1000);
     calendar = {
       uid: `leg-${uidPart(leg.pair)}-${isoDate(leg.time)}`,
       utc: timed,
@@ -1499,7 +1549,7 @@ function legEvent(leg, plan) {
       geo: { lat: leg.a.lat, lon: leg.a.lon }
     };
   }
-  return { type: 'leg', icon: leg.mode, color: mapView.ROUTE_MODES[leg.mode].color, when: dayLabel(leg.time, plan.leave), title: `${from} → ${to}${airports}`, meta, calendar };
+  return { type: 'leg', icon: leg.mode, color: mapView.ROUTE_MODES[leg.mode].color, when: dayLabel(start, plan.leave), title: `${from} → ${to}${airports}`, meta, calendar };
 }
 
 function sightsEvent(source, point, plan) {
@@ -1519,12 +1569,18 @@ function tripEvents() {
   const plans = schedule();
   const legList = legs();
   const events = [];
+  let arrived = null;
   list.forEach((point, index) => {
     const plan = plans[index];
     const source = point.holder ? holder('start') : point.start ? null : state.stops.find((stop) => stop.id === point.key);
     if (source && source.nights > 0) events.push(stayEvent(source, point, plan));
     if (source && source.sights && source.sights.length) events.push(sightsEvent(source, point, plan));
-    if (legList[index]) events.push(legEvent(legList[index], plan));
+    if (legList[index]) {
+      const after = index > 0 && plan.nights === 0 && arrived ? new Date(arrived.getTime() + 30 * 60 * 1000) : null;
+      const event = legEvent(legList[index], plan, after);
+      arrived = event.calendar ? event.calendar.end : null;
+      events.push(event);
+    }
   });
   if (list.length > 1) {
     const last = plans[plans.length - 1];
@@ -1537,6 +1593,7 @@ function tripName() {
   const list = points();
   if (!list.length) return t('route.title');
   const name = (point) => point.linkName || point.name;
+  if (list.length === 1) return name(list[0]);
   return t('route.calendarName', { from: name(list[0]), to: name(list[list.length - 1]) });
 }
 
@@ -1552,7 +1609,8 @@ function exportCalendar() {
 
 async function shareTrip() {
   const url = window.location.href.split('#')[0];
-  const text = shareText(`${tripName()} · ${summaryText()}`, tripEvents(), t('route.shareFooter', { url }));
+  const summary = totals().count ? summaryText() : '';
+  const text = shareText([tripName(), summary].filter(Boolean).join(' · '), tripEvents(), t('route.shareFooter', { url }));
   if (navigator.share) {
     try {
       await navigator.share({ title: tripName(), text });
@@ -1595,7 +1653,23 @@ function renderOverview() {
   ].filter(Boolean));
 }
 
+function editingField() {
+  const active = document.activeElement;
+  if (!active || !dom.root || !dom.root.contains(active)) return null;
+  if (active.tagName === 'SELECT' || (active.tagName === 'INPUT' && active.type === 'date')) return active;
+  return null;
+}
+
 function renderList() {
+  if (state.dragging) return;
+  const field = editingField();
+  if (field) {
+    if (!field.dataset.pending) {
+      field.dataset.pending = '1';
+      field.addEventListener('blur', () => setTimeout(renderList, 0), { once: true });
+    }
+    return;
+  }
   renderTrip();
   const list = points();
   const legList = legs();
@@ -1612,12 +1686,12 @@ function renderList() {
   dom.list.replaceChildren(...rows);
   dom.empty.textContent = state.stops.length ? '' : t('route.empty');
   dom.actions.hidden = !state.stops.length;
-  dom.optimize.disabled = list.length < 3;
+  dom.optimize.disabled = list.length < 4;
   renderOverview();
 }
 
 function render() {
-  if (!(state.startMode === 'custom' && !state.startPlace)) renderStart();
+  renderStart();
   renderList();
   renderSummary();
   renderMap();
@@ -1659,6 +1733,7 @@ function removeStop(id) {
     action: {
       label: t('favorites.undo'),
       onClick: () => {
+        if (state.stops.some((stop) => stop.id === removed.id)) return;
         state.stops.splice(Math.min(index, state.stops.length), 0, removed);
         persist();
         compute();
@@ -1670,6 +1745,10 @@ function removeStop(id) {
 export function addStop(place) {
   const stop = validStop({ ...place, id: newId() });
   if (!stop) return false;
+  if (state.stops.length >= MAX_STOPS) {
+    toast(t('route.tooMany', { n: MAX_STOPS }), { type: 'error' });
+    return false;
+  }
   const duplicate = state.stops.some((item) => distance(item, stop) < 50);
   if (duplicate) {
     toast(t('route.duplicate', { name: stop.name }));
@@ -1779,11 +1858,13 @@ function optimize() {
 }
 
 function clearRoute() {
-  const previous = { stops: state.stops, modes: state.modes };
+  const previous = { stops: state.stops, modes: state.modes, auto: state.auto };
+  let undone = false;
   state.stops = [];
   state.modes = {};
   state.auto = {};
   state.expanded = null;
+  state.picker = null;
   persist();
   compute();
   toast(t('route.cleared'), {
@@ -1791,8 +1872,12 @@ function clearRoute() {
     action: {
       label: t('favorites.undo'),
       onClick: () => {
-        state.stops = previous.stops;
-        state.modes = previous.modes;
+        if (undone) return;
+        undone = true;
+        const added = state.stops.filter((stop) => !previous.stops.some((item) => item.id === stop.id));
+        state.stops = [...previous.stops, ...added].slice(0, MAX_STOPS);
+        state.modes = { ...previous.modes, ...state.modes };
+        state.auto = { ...previous.auto, ...state.auto };
         persist();
         compute();
         fitRoute();
@@ -1801,8 +1886,26 @@ function clearRoute() {
   });
 }
 
+function moveStop(id, target) {
+  const index = state.stops.findIndex((stop) => stop.id === id);
+  if (index < 0 || target === index || target < 0 || target >= state.stops.length + 1) return false;
+  const [moved] = state.stops.splice(index, 1);
+  state.stops.splice(Math.min(target, state.stops.length), 0, moved);
+  persist();
+  compute();
+  return true;
+}
+
 function initDrag() {
   let drag = null;
+  const end = (event, apply) => {
+    if (!drag || (event && event.pointerId !== drag.pointer)) return;
+    const { id, target } = drag;
+    drag = null;
+    state.dragging = false;
+    dom.list.classList.remove('is-sorting');
+    if (!apply || target === null || !moveStop(id, target)) renderList();
+  };
   dom.list.addEventListener('pointerdown', (event) => {
     const grip = event.target.closest('[data-grip]');
     if (!grip || event.button !== 0) return;
@@ -1810,13 +1913,14 @@ function initDrag() {
     const row = grip.closest('.stop');
     dom.list.classList.add('is-sorting');
     row.classList.add('is-dragging');
+    state.dragging = true;
     drag = { id: grip.dataset.grip, row, startY: event.clientY, pointer: event.pointerId, target: null };
     grip.setPointerCapture(event.pointerId);
   });
-  dom.list.addEventListener('pointermove', (event) => {
+  window.addEventListener('pointermove', (event) => {
     if (!drag || event.pointerId !== drag.pointer) return;
     drag.row.style.transform = `translateY(${event.clientY - drag.startY}px)`;
-    const others = [...dom.list.querySelectorAll('.stop[data-id]')].filter((row) => row !== drag.row);
+    const others = [...dom.list.querySelectorAll('.stop[data-id]')].filter((row) => row.dataset.id !== drag.id);
     let target = others.length;
     for (let i = 0; i < others.length; i += 1) {
       const rect = others[i].getBoundingClientRect();
@@ -1831,25 +1935,20 @@ function initDrag() {
       row.classList.toggle('drop-after', target === others.length && i === others.length - 1);
     });
   });
-  const finish = (event) => {
-    if (!drag || event.pointerId !== drag.pointer) return;
-    const { id, target } = drag;
-    drag = null;
-    dom.list.classList.remove('is-sorting');
-    if (target === null) {
-      renderList();
-      return;
-    }
+  window.addEventListener('pointerup', (event) => end(event, true));
+  window.addEventListener('pointercancel', (event) => end(event, false));
+  dom.list.addEventListener('keydown', (event) => {
+    const grip = event.target.closest('[data-grip]');
+    if (!grip || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    event.preventDefault();
+    const id = grip.dataset.grip;
     const index = state.stops.findIndex((stop) => stop.id === id);
-    const [moved] = state.stops.splice(index, 1);
-    state.stops.splice(target, 0, moved);
-    state.expanded = null;
-    state.picker = null;
-    persist();
-    compute();
-  };
-  dom.list.addEventListener('pointerup', finish);
-  dom.list.addEventListener('pointercancel', finish);
+    if (!moveStop(id, index + (event.key === 'ArrowUp' ? -1 : 1))) return;
+    requestAnimationFrame(() => {
+      const next = dom.list.querySelector(`[data-grip="${CSS.escape(id)}"]`);
+      if (next) next.focus();
+    });
+  });
 }
 
 export function initPlanner(container, opts) {
@@ -1865,6 +1964,7 @@ export function initPlanner(container, opts) {
   dom.optimize = el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: optimize });
   dom.clear = el('button', { type: 'button', class: 'btn btn--ghost btn--small', onclick: clearRoute });
   dom.actions = el('div', { class: 'route-actions' }, dom.overviewBtn, dom.optimize, dom.clear);
+  dom.root = container;
   container.replaceChildren(el('div', { class: 'planner' },
     dom.trip,
     dom.start,
@@ -1875,7 +1975,8 @@ export function initPlanner(container, opts) {
   initDrag();
   mapView.setRouteHandlers({
     onLegClick: (index) => {
-      state.expanded = index;
+      const leg = legs()[index];
+      state.expanded = leg ? leg.pair : null;
       state.picker = null;
       if (options.onShow) options.onShow();
       render();
@@ -1930,10 +2031,6 @@ export function retryFailed() {
     }
   }
   if (changed) compute();
-}
-
-export function hasRoute() {
-  return state.stops.length > 0;
 }
 
 function findStay(stop) {

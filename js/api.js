@@ -908,8 +908,15 @@ async function busStationsFromNominatim(point, signal) {
     .filter((item) => Number.isFinite(item.position.lat) && Number.isFinite(item.position.lon));
 }
 
-function shortLabel(name) {
-  return name.length > 22 ? `${name.slice(0, 21)}…` : name;
+export function shortLabel(name, max = 22) {
+  if (name.length <= max) return name;
+  const words = name.split(/[\s,–-]+/).filter(Boolean);
+  let label = words[0] || name;
+  for (const word of words.slice(1)) {
+    if (`${label} ${word}`.length > max) break;
+    label = `${label} ${word}`;
+  }
+  return label;
 }
 
 export async function nearbyStations(point, type, signal = null) {
@@ -946,9 +953,4 @@ export async function nearbyStations(point, type, signal = null) {
   stationCache.set(key, list);
   save('stations4', Object.fromEntries([...stationCache.entries()].filter(([, value]) => value.length).slice(-120)));
   return list;
-}
-
-export async function nearestStation(point, type, signal = null) {
-  const list = await nearbyStations(point, type, signal);
-  return list[0] || null;
 }

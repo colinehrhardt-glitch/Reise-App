@@ -2,7 +2,7 @@ import { t, getLanguage, formatDistance } from './i18n.js';
 import { load, save } from './storage.js';
 import { reverseGeocode } from './api.js';
 import { fetchSummary, fetchForecast, fetchClimate, fetchCountry, fetchRates, fetchPlaceAdvisories, fetchEmergency, fetchGuide, fetchSights, countryName, SIGHT_TYPES } from './info.js';
-import { el, icon, distance, errorMessage, formatNumber, gallery } from './ui.js';
+import { el, icon, distance, formatNumber, gallery } from './ui.js';
 
 const CARDS = ['summary', 'weather', 'sights', 'country', 'safety', 'tips'];
 const CARD_ICONS = { summary: 'info', weather: 'w-partly', sights: 'sights', country: 'flag', safety: 'shield', tips: 'book' };
@@ -10,6 +10,13 @@ const TIP_KEYS = ['around', 'eat', 'drink', 'respect', 'health'];
 const TIP_ICONS = { around: 'bus', eat: 'food', drink: 'w-moon', respect: 'info', health: 'health' };
 const SIGHT_PAGE = 20;
 const FORECAST_DAYS = 7;
+const HOUR = 60 * 60 * 1000;
+const FRESH = { weather: HOUR, summary: 24 * HOUR, sights: 24 * HOUR, country: 12 * HOUR, safety: 12 * HOUR, tips: 24 * HOUR };
+const PORTALS = [
+  ['de', 'https://www.auswaertiges-amt.de/de/ReiseUndSicherheit/reise-und-sicherheitshinweise'],
+  ['uk', 'https://www.gov.uk/foreign-travel-advice'],
+  ['us', 'https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html']
+];
 
 const state = {
   place: sanitizePlace(load('discoverPlace', null)),
@@ -19,7 +26,9 @@ const state = {
   sightLimit: SIGHT_PAGE,
   allDays: false,
   tipTab: null,
-  resolving: null
+  resolving: null,
+  centerRun: 0,
+  centerBusy: false
 };
 let options = {};
 let root = null;
@@ -66,7 +75,18 @@ function resultFor(card) {
 }
 
 function setResult(card, place, lang, value) {
-  state.results.set(`${card}|${lang}|${placeKey(place)}`, value);
+  state.results.set(`${card}|${lang}|${placeKey(place)}`, { ...value, time: Date.now() });
+}
+
+function stale(card, result) {
+  return result.status === 'error' || (result.status === 'ok' && Date.now() - result.time > FRESH[card]);
+}
+
+function cardError(error) {
+  const code = error && error.code;
+  if (code === 'offline') return t('errors.offline');
+  if (code === 'timeout' || code === 'busy') return t('errors.slow');
+  return t('errors.server');
 }
 
 function current(place, lang) {
@@ -107,10 +127,6 @@ export function currentStopId() {
   return state.place && state.place.source === 'stop' ? state.place.stopId : null;
 }
 
-export function hasDiscoverPlace() {
-  return Boolean(state.place);
-}
-
 function stopDates(place) {
   if (!place || !place.stopId || !options.getStops) return null;
   const stop = options.getStops().find((item) => item.id === place.stopId);
@@ -118,7 +134,7 @@ function stopDates(place) {
 }
 
 async function resolvePlace(place) {
-  if (place.country && place.wikidata) return place;
+  if (place.country && (place.wikidata || place.source === 'search')) return place;
   if (state.resolving && state.resolving.place === place) return state.resolving.promise;
   const promise = reverseGeocode(place.lat, place.lon, getLanguage()).then((info) => {
     const merged = { ...place, country: place.country || info.country, detail: place.detail || info.region || '', wikidata: place.wikidata || (place.source !== 'search' ? info.wikidata : null) };
@@ -127,7 +143,11 @@ async function resolvePlace(place) {
       save('discoverPlace', merged);
     }
     return merged;
-  }).catch(() => place);
+  }).catch((error) => {
+    if (state.resolving && state.resolving.place === place) state.resolving = null;
+    if (error && error.code === 'offline') throw error;
+    return place;
+  });
   state.resolving = { place, promise };
   return promise;
 }
@@ -173,19 +193,25 @@ async function loadCard(card, force = false) {
   const lang = getLanguage();
   if (!initial) return;
   const existing = resultFor(card);
-  if (existing && !force && existing.status !== 'error') return;
-  setResult(card, initial, lang, { status: 'loading' });
-  renderCard(card);
+  if (existing && !force && (existing.status === 'loading' || !stale(card, existing))) return;
+  const keep = existing && existing.status === 'ok' && !force;
+  if (!keep) {
+    setResult(card, initial, lang, { status: 'loading' });
+    renderCard(card);
+  }
   try {
     const place = await resolvePlace(initial);
     const data = await LOADERS[card](place, lang, initial);
     setResult(card, initial, lang, { status: 'ok', data });
-    if (state.place && placeKey(state.place) === placeKey(initial)) {
+    if (state.place && placeKey(state.place) === placeKey(initial) && getLanguage() === lang) {
       if (card === 'sights' && options.onSights) options.onSights(data || []);
       if (card === 'country' && options.onHeader) options.onHeader();
     }
   } catch (error) {
-    setResult(card, initial, lang, { status: 'error', error });
+    if (keep) return;
+    const partial = state.results.get(`${card}|${lang}|${placeKey(initial)}`);
+    if (partial && partial.partial) setResult(card, initial, lang, { status: 'ok', data: partial.data });
+    else setResult(card, initial, lang, { status: 'error', error });
   }
   if (state.place && placeKey(state.place) === placeKey(initial) && getLanguage() === lang) {
     renderCard(card);
@@ -215,10 +241,25 @@ function cardBody(card) {
   }
   if (result.status === 'error') {
     return el('div', { class: 'discover__error' },
-      el('p', { text: errorMessage(result.error) }),
-      el('button', { type: 'button', class: 'btn btn--secondary btn--small', onclick: () => loadCard(card, true) }, el('span', { text: t('common.retry') })));
+      el('p', { text: cardError(result.error) }),
+      el('button', { type: 'button', class: 'btn btn--secondary btn--small', 'data-focus': `retry:${card}`, onclick: () => loadCard(card, true) }, el('span', { text: t('common.retry') })));
   }
   return RENDERERS[card](result.data);
+}
+
+function keepFocus(scope, update) {
+  const active = document.activeElement;
+  const focus = active && scope.contains(active) ? active.getAttribute('data-focus') : null;
+  const scrollers = [...scope.querySelectorAll('[data-scroll]')].map((node) => [node.getAttribute('data-scroll'), node.scrollLeft]);
+  update();
+  for (const [key, left] of scrollers) {
+    const node = scope.querySelector(`[data-scroll="${key}"]`);
+    if (node) node.scrollLeft = left;
+  }
+  if (focus) {
+    const target = [...scope.querySelectorAll('[data-focus]')].find((node) => node.getAttribute('data-focus') === focus);
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 
 function renderCard(card) {
@@ -226,7 +267,13 @@ function renderCard(card) {
   const node = root.querySelector(`[data-card="${card}"]`);
   if (!node) return;
   const body = node.querySelector('.discover-card__body');
-  if (body) body.replaceChildren(cardBody(card));
+  if (!body) return;
+  const previous = body.querySelector('.gallery');
+  keepFocus(body, () => {
+    body.replaceChildren(cardBody(card));
+    const next = body.querySelector('.gallery');
+    if (previous && next && previous.dataset.key === next.dataset.key) next.replaceWith(previous);
+  });
 }
 
 function cardNode(card) {
@@ -235,10 +282,13 @@ function cardNode(card) {
     type: 'button',
     class: 'discover-card__head',
     'aria-expanded': String(open),
+    'data-focus': `card:${card}`,
     onclick: () => {
       state.open[card] = !state.open[card];
       save('discoverOpen', state.open);
-      renderDiscover();
+      const section = root.querySelector(`[data-card="${card}"]`);
+      if (section) keepFocus(section.parentNode, () => section.replaceWith(cardNode(card)));
+      else renderDiscover();
       if (state.open[card]) loadCard(card);
     }
   },
@@ -299,9 +349,11 @@ function renderSummary(data) {
   const glance = glanceItems();
   const chips = glance.length ? el('ul', { class: 'glance' }, glance.map(([name, text]) => el('li', { class: 'glance__item' }, icon(name), el('span', { text })))) : null;
   const images = cityImages(data);
-  if (!data) return el('div', { class: 'summary' }, images.length ? gallery(images) : null, chips, empty(t('discover.noSummary')));
+  const strip = images.length ? gallery(images) : null;
+  if (strip) strip.dataset.key = images.map((image) => image.src).join('|');
+  if (!data) return el('div', { class: 'summary' }, strip, chips, empty(t('discover.noSummary')));
   return el('div', { class: 'summary' },
-    images.length ? gallery(images) : null,
+    strip,
     el('p', { class: 'summary__text', text: data.text }),
     chips);
 }
@@ -352,7 +404,16 @@ function climateBlock(dates, forecast) {
   const cached = state.results.get(`${key}|${placeKey(place)}`);
   const fill = (value) => {
     if (!value || value.status === 'error') {
-      holder.replaceChildren(empty(t('weather.climateFailed')));
+      holder.replaceChildren(empty(t('weather.climateFailed')), el('button', {
+        type: 'button',
+        class: 'link-btn',
+        'data-focus': 'climate',
+        text: t('common.retry'),
+        onclick: () => {
+          state.results.delete(`${key}|${placeKey(place)}`);
+          renderCard('weather');
+        }
+      }));
       return;
     }
     const data = value.data;
@@ -360,8 +421,7 @@ function climateBlock(dates, forecast) {
       el('p', { class: 'climate__title', text: t('weather.climateTitle', { range: rangeLabel(dates.from, to) }) }),
       el('div', { class: 'climate__values' },
         el('span', { class: 'climate__temp', text: `${temp(data.max)} / ${temp(data.min)}` }),
-        data.rain !== null ? el('span', { text: t('weather.climateRain', { mm: formatNumber(Math.round(data.rain * 10) / 10), share: Math.round(data.rainyShare * 100) }) }) : null),
-      null);
+        data.rain !== null ? el('span', { text: t('weather.climateRain', { mm: formatNumber(Math.round(data.rain * 10) / 10), share: Math.round(data.rainyShare * 100) }) }) : null));
   };
   if (cached) fill(cached);
   else {
@@ -419,6 +479,7 @@ function renderWeather(data) {
     data.days.length > FORECAST_DAYS ? el('button', {
       type: 'button',
       class: 'link-btn',
+      'data-focus': 'days',
       text: state.allDays ? t('weather.lessDays') : t('weather.moreDays', { n: data.days.length }),
       onclick: () => {
         state.allDays = !state.allDays;
@@ -549,7 +610,9 @@ function renderSafety(data) {
   if (section) points.push(...section.points);
   return el('div', { class: 'safety' },
     items.length ? safetyGauge(items, advice.scope) : null,
-    items.length ? el('ul', { class: 'advisories' }, items.map(advisoryRow)) : el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
+    items.length ? el('ul', { class: 'advisories' }, items.map(advisoryRow)) : el('div', { class: 'portals' },
+      el('p', { class: 'discover__note', text: t('safety.adviceUnavailable') }),
+      el('ul', { class: 'portals__list' }, PORTALS.map(([id, url]) => el('li', {}, el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: t(`safety.source.${id}`) }))))),
     data.emergency && data.emergency.length ? el('div', { class: 'emergency' },
       icon('phone'),
       el('span', { class: 'emergency__label', text: t('safety.emergency') }),
@@ -563,10 +626,11 @@ function renderTips(data) {
   if (!sections.length) return empty(t('tips.none'));
   const active = sections.includes(state.tipTab) ? state.tipTab : sections[0];
   return el('div', { class: 'tips' },
-    el('div', { class: 'tips__tabs', role: 'tablist', 'aria-label': t('discover.tips') }, sections.map((key) => el('button', {
+    el('div', { class: 'tips__tabs', role: 'tablist', 'aria-label': t('discover.tips'), 'data-scroll': 'tips' }, sections.map((key) => el('button', {
       type: 'button',
       class: 'tips__tab',
       role: 'tab',
+      'data-focus': `tip:${key}`,
       'aria-selected': String(key === active),
       onclick: () => {
         state.tipTab = key;
@@ -595,6 +659,7 @@ function sightRow(item, index) {
       type: 'button',
       class: `icon-btn sight__save${saved ? ' is-saved' : ''}`,
       'aria-pressed': String(saved),
+      'data-focus': `save:${item.id}`,
       'aria-label': t(saved ? 'sights.savedFor' : 'sights.saveFor', { place: target.name }),
       title: t(saved ? 'sights.savedFor' : 'sights.saveFor', { place: target.name }),
       onclick: () => {
@@ -613,6 +678,7 @@ function renderSights(items) {
     type: 'button',
     class: 'chip',
     'aria-pressed': String(state.sightFilter === value),
+    'data-focus': `filter:${value}`,
     onclick: () => {
       state.sightFilter = value;
       state.sightLimit = SIGHT_PAGE;
@@ -621,12 +687,13 @@ function renderSights(items) {
   }, el('span', { text: label }), el('span', { class: 'chip__count', text: formatNumber(count) }));
   const target = options.sightTarget && items[0] ? options.sightTarget(items[0]) : null;
   return el('div', { class: 'sights' },
-    types.length > 1 ? el('div', { class: 'sights__filters' }, chip('all', t('filter.all'), items.length), types.map((type) => chip(type, t(`sights.type.${type}`), items.filter((item) => item.type === type).length))) : null,
+    types.length > 1 ? el('div', { class: 'sights__filters', 'data-scroll': 'filters' }, chip('all', t('filter.all'), items.length), types.map((type) => chip(type, t(`sights.type.${type}`), items.filter((item) => item.type === type).length))) : null,
 
     el('ul', { class: 'sight-list' }, shown.map(sightRow)),
     visible.length > shown.length ? el('button', {
       type: 'button',
       class: 'btn btn--secondary btn--small sights__more',
+      'data-focus': 'more',
       onclick: () => {
         state.sightLimit += SIGHT_PAGE;
         renderCard('sights');
@@ -642,50 +709,64 @@ function placeChips() {
   const stops = options.getStops ? options.getStops() : [];
   const chips = [];
   const active = state.place;
-  const chip = (label, place, isActive, iconName) => el('button', {
+  const chip = (label, place, isActive, iconName, focusKey) => el('button', {
     type: 'button',
     class: 'chip',
     'aria-pressed': String(isActive),
+    'data-focus': focusKey,
     onclick: () => {
+      state.centerRun += 1;
+      state.centerBusy = false;
       setDiscoverPlace(place);
       activateDiscover();
       if (options.onPlaceChange) options.onPlaceChange(state.place);
     }
   }, iconName ? icon(iconName) : null, el('span', { text: label }));
-  if (active && active.source !== 'stop') chips.push(chip(active.name, active, true, active.source === 'center' ? 'locate' : 'search'));
+  if (active && active.source !== 'stop') chips.push(chip(active.name, active, true, active.source === 'center' ? 'locate' : 'search', 'place:current'));
   for (const stop of stops) {
     const isActive = Boolean(active && active.source === 'stop' && active.stopId === stop.id);
-    chips.push(chip(stop.name, { ...stop, stopId: stop.id, source: 'stop' }, isActive, null));
+    chips.push(chip(stop.name, { ...stop, stopId: stop.id, source: 'stop' }, isActive, null, `place:${stop.id}`));
   }
   chips.push(el('button', {
     type: 'button',
-    class: 'chip chip--action',
+    class: `chip chip--action${state.centerBusy ? ' is-busy' : ''}`,
+    'aria-busy': String(state.centerBusy),
+    'data-focus': 'place:center',
     onclick: async () => {
+      if (state.centerBusy) return;
+      const run = ++state.centerRun;
       const center = options.getCenter();
+      state.centerBusy = true;
+      renderDiscover();
       let info = null;
       try {
         info = await reverseGeocode(center.lat, center.lon, getLanguage());
       } catch {
         info = null;
       }
+      if (run !== state.centerRun) return;
+      state.centerBusy = false;
       setDiscoverPlace({ name: (info && info.name) || t('discover.mapCenter'), detail: info && info.region, lat: center.lat, lon: center.lon, country: info && info.country, wikidata: info && info.wikidata, source: 'center' });
       activateDiscover();
       if (options.onPlaceChange) options.onPlaceChange(state.place);
     }
-  }, icon('locate'), el('span', { text: t('discover.mapCenter') })));
-  return el('div', { class: 'discover__places', role: 'toolbar', 'aria-label': t('discover.places') }, chips);
+  }, state.centerBusy ? el('span', { class: 'spinner' }) : icon('locate'), el('span', { text: t('discover.mapCenter') })));
+  return el('div', { class: 'discover__places', role: 'toolbar', 'aria-label': t('discover.places'), 'data-scroll': 'places' }, chips);
 }
 
 export function renderDiscover() {
   if (!root) return;
-  if (!state.place) {
-    root.replaceChildren(el('div', { class: 'discover' }, placeChips(), empty(t('discover.empty'))));
-    if (options.onHeader) options.onHeader();
-    return;
+  const placeChanged = root.dataset.place !== (state.place ? placeKey(state.place) : '');
+  keepFocus(root, () => {
+    root.replaceChildren(state.place
+      ? el('div', { class: 'discover' }, placeChips(), CARDS.map(cardNode))
+      : el('div', { class: 'discover' }, placeChips(), empty(t('discover.empty'))));
+  });
+  root.dataset.place = state.place ? placeKey(state.place) : '';
+  if (placeChanged) {
+    const chip = root.querySelector('.discover__places .chip[aria-pressed="true"]');
+    if (chip && chip.scrollIntoView) chip.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
-  root.replaceChildren(el('div', { class: 'discover' },
-    placeChips(),
-    CARDS.map(cardNode)));
   if (options.onHeader) options.onHeader();
 }
 
@@ -697,4 +778,8 @@ export function initDiscover(container, opts) {
   root = container;
   options = opts;
   renderDiscover();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) activateDiscover();
+  });
+  window.addEventListener('online', () => activateDiscover());
 }

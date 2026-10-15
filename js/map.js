@@ -114,6 +114,7 @@ let userAccuracy = null;
 let popup = null;
 let currentAttribution = '';
 let insets = { top: 0, right: 0, bottom: 0, left: 0 };
+let rawInsets = { ...insets };
 let handlers = {};
 let accommodationsVisible = true;
 let routeLayer = null;
@@ -202,9 +203,9 @@ export function initMap(container, options = {}) {
   favoritesLayer = L.layerGroup().addTo(map);
   routeRenderer = L.svg({ padding: 1.5 });
   routeLayer = L.featureGroup().addTo(map);
-  map.on('zoomend moveend', scheduleRouteRedraw);
+  map.on('moveend', scheduleRouteRedraw);
 
-  map.on('moveend zoomend', () => handlers.onViewChange?.());
+  map.on('moveend', () => handlers.onViewChange?.());
   map.on('click', () => handlers.onMapClick?.());
   map.on('popupclose', (event) => {
     if (event.popup === popup) {
@@ -219,7 +220,10 @@ function vectorSupported() {
   if (typeof window.maplibregl === 'undefined' || typeof L.maplibreGL !== 'function') return false;
   try {
     const canvas = document.createElement('canvas');
-    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'));
+    const context = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    const lose = context && context.getExtension('WEBGL_lose_context');
+    if (lose) lose.loseContext();
+    return Boolean(context);
   } catch {
     return false;
   }
@@ -242,8 +246,19 @@ function useRaster() {
 
 function createVector(theme) {
   const layer = L.maplibreGL({ style: VECTOR_STYLES[theme], attributionControl: false, interactive: false, updateInterval: 8, padding: 0.3 });
-  layer.addTo(map);
-  const gl = layer.getMaplibreMap();
+  let gl = null;
+  try {
+    layer.addTo(map);
+    gl = layer.getMaplibreMap();
+    if (!gl) throw new Error('webgl');
+  } catch (error) {
+    try {
+      map.removeLayer(layer);
+    } catch {
+      gl = null;
+    }
+    throw error;
+  }
   const entry = { kind: 'vector', layer, gl, loaded: false, theme };
   base = entry;
   const timer = setTimeout(() => {
@@ -272,8 +287,13 @@ export function setMapTheme(dark) {
   if (base && theme === baseTheme) return;
   baseTheme = theme;
   if (!base) {
-    if (vectorSupported()) createVector(theme);
-    else useRaster();
+    if (vectorSupported()) {
+      try {
+        createVector(theme);
+      } catch {
+        useRaster();
+      }
+    } else useRaster();
   } else if (base.kind === 'vector') {
     base.theme = theme;
     base.gl.setStyle(VECTOR_STYLES[theme]);
@@ -296,7 +316,10 @@ export function setAttribution(html) {
 }
 
 export function setInsets(next) {
-  insets = { ...insets, ...next };
+  rawInsets = { ...rawInsets, ...next };
+  insets = { ...rawInsets };
+  const height = map ? map.getSize().y : 0;
+  if (height && height - insets.top - insets.bottom < 120) insets.bottom = Math.max(0, height - insets.top - Math.max(120, Math.round(height * 0.4)));
 }
 
 export function getView() {
@@ -308,10 +331,15 @@ export function getZoom() {
   return map.getZoom();
 }
 
+function visibleBottom(size) {
+  const bottom = size.y - insets.bottom;
+  return bottom - insets.top < 120 ? size.y : bottom;
+}
+
 export function getBounds() {
   const size = map.getSize();
   const topLeft = map.containerPointToLatLng([insets.left, insets.top]);
-  const bottomRight = map.containerPointToLatLng([size.x - insets.right, Math.max(insets.top + 1, size.y - insets.bottom)]);
+  const bottomRight = map.containerPointToLatLng([size.x - insets.right, visibleBottom(size)]);
   const west = Math.max(-180, L.Util.wrapNum(topLeft.lng, [-180, 180], true));
   let east = Math.min(180, L.Util.wrapNum(bottomRight.lng, [-180, 180], true));
   if (east < west) east = 180;
@@ -395,7 +423,7 @@ export function boundsAt(lat, lon, zoom) {
   const size = map.getSize();
   const origin = map.project(centerFor(L.latLng(lat, lon), zoom), zoom).subtract(size.divideBy(2));
   const topLeft = map.unproject(origin.add([insets.left, insets.top]), zoom);
-  const bottomRight = map.unproject(origin.add([size.x - insets.right, Math.max(insets.top + 1, size.y - insets.bottom)]), zoom);
+  const bottomRight = map.unproject(origin.add([size.x - insets.right, visibleBottom(size)]), zoom);
   return {
     south: Math.max(-90, bottomRight.lat),
     north: Math.min(90, topLeft.lat),
@@ -508,6 +536,7 @@ export function renderPoiLayer(category, items, visible) {
     poiGroups.set(category, group);
   }
   const ids = items.map((item) => item.id).join(',');
+  group.items = new Map(items.map((item) => [item.id, item]));
   if (ids !== group.ids) {
     group.ids = ids;
     group.layer.clearLayers();
@@ -518,7 +547,7 @@ export function renderPoiLayer(category, items, visible) {
         title: item.name || '',
         riseOnHover: true
       });
-      marker.on('click', () => handlers.onPoiClick?.(item));
+      marker.on('click', () => handlers.onPoiClick?.(group.items.get(item.id) || item));
       return marker;
     }));
   }
@@ -629,6 +658,13 @@ export function arcCoords(from, to, steps = 64) {
   return coords;
 }
 
+function worldCopies(coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return [];
+  const lons = coords.map((point) => point[1]);
+  const shift = Math.max(...lons) > 180 ? -360 : Math.min(...lons) < -180 ? 360 : 0;
+  return shift ? [coords, coords.map(([lat, lon]) => [lat, lon + shift])] : [coords];
+}
+
 function stopIcon(label, start) {
   return L.divIcon({
     className: 'marker-icon',
@@ -711,16 +747,15 @@ function drawRoute() {
     const style = ROUTE_MODES[leg.mode] || ROUTE_MODES.car;
     const dim = hasSelection && index !== selected;
     const pick = () => routeHandlers.onLegClick?.(index);
-    const hitCoords = Array.isArray(leg.segments) && leg.segments.length ? leg.segments.flatMap((segment) => segment.coords || []) : leg.coords;
-    if (Array.isArray(hitCoords) && hitCoords.length > 1) {
-      L.polyline(hitCoords, { renderer: routeRenderer, color: '#000', opacity: 0, weight: 26, lineCap: 'round', className: 'route-hit' }).addTo(routeLayer).on('click', pick);
-    }
-    if (hasSelection && index === selected && Array.isArray(hitCoords) && hitCoords.length > 1) {
-      L.polyline(hitCoords, { renderer: routeRenderer, color: style.color, opacity: 0.22, weight: 16, lineCap: 'round', interactive: false }).addTo(routeLayer);
-    }
-    const segments = Array.isArray(leg.segments) && leg.segments.length ? leg.segments : [{ coords: leg.coords, kind: 'main' }];
+    const segments = (Array.isArray(leg.segments) && leg.segments.length ? leg.segments : [{ coords: leg.coords, kind: 'main' }])
+      .flatMap((segment) => worldCopies(segment.coords).map((coords) => ({ kind: segment.kind, coords })));
     for (const segment of segments) {
-      if (!Array.isArray(segment.coords) || segment.coords.length < 2) continue;
+      L.polyline(segment.coords, { renderer: routeRenderer, color: '#000', opacity: 0, weight: 26, lineCap: 'round', className: 'route-hit' }).addTo(routeLayer).on('click', pick);
+      if (hasSelection && index === selected) {
+        L.polyline(segment.coords, { renderer: routeRenderer, color: style.color, opacity: 0.22, weight: 16, lineCap: 'round', interactive: false }).addTo(routeLayer);
+      }
+    }
+    for (const segment of segments) {
       if (segment.kind === 'ground') {
         const line = L.polyline(segment.coords, {
           renderer: routeRenderer,
@@ -780,7 +815,7 @@ export function fitCoords(coords, maxZoom = 14) {
   const valid = coords.filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
   if (!valid.length) return;
   if (valid.length === 1) {
-    moveTo(valid[0], Math.max(map.getZoom(), 12));
+    moveTo(valid[0], Math.min(Math.max(map.getZoom(), 12), Math.max(maxZoom, 12)));
     return;
   }
   const bounds = L.latLngBounds(valid);

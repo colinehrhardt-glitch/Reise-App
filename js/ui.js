@@ -80,29 +80,54 @@ export function toast(message, { type = 'info', action = null, duration = 4000 }
 }
 
 function largeSrc(src) {
-  return /[?&]width=\d+/.test(src) ? src.replace(/([?&]width=)\d+/, '$11280') : src;
+  if (/[?&]width=\d+/.test(src)) return src.replace(/([?&]width=)\d+/, '$11280');
+  return /\/thumb\/.+\/\d+px-[^/]+$/.test(src) ? src.replace(/\/(\d+)px-([^/]+)$/, (match, size, name) => (Number(size) < 1280 ? `/1280px-${name}` : match)) : src;
 }
 
 export function openLightbox(images, start = 0) {
   const previous = document.activeElement;
-  const track = el('div', { class: 'lightbox__track' }, images.map((image) => el('figure', { class: 'lightbox__slide' },
-    el('img', { src: largeSrc(image.full || image.src), alt: image.label || '', decoding: 'async', referrerpolicy: 'no-referrer' }),
+  const picture = (image) => {
+    const source = image.full || image.src;
+    const img = el('img', { src: largeSrc(source), alt: image.label || '', decoding: 'async', referrerpolicy: 'no-referrer' });
+    img.addEventListener('error', () => {
+      if (img.getAttribute('src') !== source) img.src = source;
+    }, { once: true });
+    return img;
+  };
+  const track = el('div', { class: 'lightbox__track' }, images.map((image, index) => el('figure', { class: 'lightbox__slide', 'aria-label': `${index + 1} / ${images.length}` },
+    picture(image),
     el('figcaption', { class: 'lightbox__caption' },
       image.label ? el('span', { class: 'lightbox__label', text: image.label }) : null,
       image.link ? el('a', { class: 'lightbox__credit', href: image.link, target: '_blank', rel: 'noopener noreferrer', text: t('photo.credit', { source: image.credit || 'Wikimedia Commons' }) }) : null))));
+  const step = (direction) => track.scrollBy({ left: direction * track.clientWidth, behavior: 'smooth' });
   const close = () => {
-    document.removeEventListener('keydown', onKey);
+    document.removeEventListener('keydown', onKey, true);
     overlay.remove();
-    if (previous && previous.focus) previous.focus({ preventScroll: true });
+    if (previous && previous.isConnected && previous.focus) previous.focus({ preventScroll: true });
   };
   const onKey = (event) => {
-    if (event.key === 'Escape') close();
-    if (event.key === 'ArrowRight') track.scrollBy({ left: track.clientWidth, behavior: 'smooth' });
-    if (event.key === 'ArrowLeft') track.scrollBy({ left: -track.clientWidth, behavior: 'smooth' });
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    } else if (event.key === 'ArrowRight') step(1);
+    else if (event.key === 'ArrowLeft') step(-1);
+    else if (event.key === 'Tab') {
+      const focusable = [...overlay.querySelectorAll('button, a[href]')];
+      const index = focusable.indexOf(document.activeElement);
+      const next = event.shiftKey ? (index <= 0 ? focusable.length - 1 : index - 1) : (index + 1) % focusable.length;
+      event.preventDefault();
+      focusable[next].focus();
+    }
   };
   const closeButton = el('button', { type: 'button', class: 'lightbox__close', 'aria-label': t('common.close'), onclick: close }, icon('close'));
-  const overlay = el('div', { class: 'lightbox', role: 'dialog', 'aria-modal': 'true' }, track, closeButton);
-  document.addEventListener('keydown', onKey);
+  const arrows = images.length > 1 ? [
+    el('button', { type: 'button', class: 'lightbox__nav lightbox__nav--prev', 'aria-label': t('gallery.prev'), onclick: () => step(-1) }, icon('chevron')),
+    el('button', { type: 'button', class: 'lightbox__nav lightbox__nav--next', 'aria-label': t('gallery.next'), onclick: () => step(1) }, icon('chevron'))
+  ] : [];
+  const label = images[start] && images[start].label ? images[start].label : t('gallery.open');
+  const overlay = el('div', { class: 'lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': label }, track, ...arrows, closeButton);
+  document.addEventListener('keydown', onKey, true);
   document.body.append(overlay);
   requestAnimationFrame(() => {
     track.scrollLeft = start * track.clientWidth;

@@ -1,4 +1,4 @@
-const VERSION = 'viaro-v6';
+const VERSION = 'viaro-v7';
 const SHELL = [
   './',
   'index.html',
@@ -49,26 +49,39 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key !== VERSION).map((key) => caches.delete(key)));
+    await Promise.all(keys.filter((key) => key.startsWith('viaro-') && key !== VERSION).map((key) => caches.delete(key)));
     await self.clients.claim();
   })());
 });
 
+let slowUntil = 0;
+
 async function networkFirst(request) {
   const cache = await caches.open(VERSION);
+  const cached = cache.match(request, { ignoreSearch: true }).then((hit) => hit || (request.mode === 'navigate' ? cache.match('./') : null));
   const network = fetch(request, { cache: 'no-cache' }).then((response) => {
-    if (response.ok) cache.put(request, response.clone());
+    if (response.ok) {
+      cache.put(request, response.clone());
+      slowUntil = 0;
+    }
     return response;
   });
   network.catch(() => null);
-  const cached = cache.match(request, { ignoreSearch: true }).then((hit) => hit || (request.mode === 'navigate' ? cache.match('./') : null));
+  if (Date.now() < slowUntil) {
+    const hit = await cached;
+    if (hit) return hit;
+  }
   const fallback = new Promise((resolve) => {
-    setTimeout(async () => resolve(await cached), NETWORK_WAIT);
+    setTimeout(async () => {
+      const hit = await cached;
+      if (hit) slowUntil = Date.now() + 30000;
+      resolve(hit);
+    }, NETWORK_WAIT);
   });
   try {
-    const response = await Promise.race([network, fallback]);
-    if (response) return response;
-    return await network;
+    const response = (await Promise.race([network, fallback])) || (await network);
+    if (response.ok) return response;
+    return (await cached) || response;
   } catch (error) {
     const hit = await cached;
     if (hit) return hit;
