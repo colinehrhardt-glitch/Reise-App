@@ -195,7 +195,12 @@ async function loadCard(card, force = false) {
 }
 
 export function activateDiscover() {
-  if (!state.place || !options.isActive || !options.isActive()) return;
+  if (!options.isActive || !options.isActive()) return;
+  if (!state.place && options.getStops) {
+    const first = options.getStops()[0];
+    if (first) setDiscoverPlace({ ...first, stopId: first.id, source: 'stop' });
+  }
+  if (!state.place) return;
   for (const card of CARDS) if (state.open[card]) loadCard(card);
   if (!state.open.sights) loadCard('sights');
   if (!state.open.country && state.place.country) loadCard('country');

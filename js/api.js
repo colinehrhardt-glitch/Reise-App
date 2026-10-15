@@ -70,17 +70,42 @@ const photoCache = new Map();
 const overpassCache = restoreCache();
 let preferredEndpoint = Math.min(OVERPASS_URLS.length - 1, Math.max(0, Number(load('overpassEndpoint', 0)) || 0));
 let lastNominatimCall = 0;
-let nominatimQueue = Promise.resolve();
+const nominatimWaiting = [];
+let nominatimTimer = 0;
 
-function nominatimTurn(signal = null) {
-  const turn = nominatimQueue.then(async () => {
-    if (signal && signal.aborted) throw new ApiError('aborted');
-    const wait = lastNominatimCall + NOMINATIM_INTERVAL - Date.now();
-    if (wait > 0) await abortableSleep(wait, signal);
-    lastNominatimCall = Date.now();
+function pumpNominatim() {
+  if (nominatimTimer || !nominatimWaiting.length) return;
+  const wait = Math.max(0, lastNominatimCall + NOMINATIM_INTERVAL - Date.now());
+  nominatimTimer = setTimeout(() => {
+    nominatimTimer = 0;
+    const urgent = nominatimWaiting.findIndex((entry) => entry.priority);
+    const [next] = nominatimWaiting.splice(urgent >= 0 ? urgent : 0, 1);
+    if (next) {
+      lastNominatimCall = Date.now();
+      next.resolve();
+    }
+    pumpNominatim();
+  }, wait);
+}
+
+function nominatimTurn(signal = null, priority = false) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new ApiError('aborted'));
+      return;
+    }
+    const entry = { resolve, priority };
+    nominatimWaiting.push(entry);
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        const index = nominatimWaiting.indexOf(entry);
+        if (index < 0) return;
+        nominatimWaiting.splice(index, 1);
+        reject(new ApiError('aborted'));
+      }, { once: true });
+    }
+    pumpNominatim();
   });
-  nominatimQueue = turn.catch(() => {});
-  return turn;
 }
 
 export async function request(url, options = {}, timeout = 30000, signal = null) {
@@ -121,7 +146,7 @@ export async function searchPlaces(query, lang, { countries = [] } = {}) {
   const key = `${lang}|${codes}|${query.trim().toLowerCase()}`;
   if (nominatimCache.has(key)) return nominatimCache.get(key);
 
-  await nominatimTurn();
+  await nominatimTurn(null, true);
 
   const params = new URLSearchParams({
     q: query.trim(),
@@ -310,7 +335,7 @@ function fallbackTags(item, tourism) {
 export async function fetchAccommodationsFallback(bounds, lang, signal = null) {
   const places = new Map();
   for (const [phrase, tourism] of FALLBACK_TYPES) {
-    await nominatimTurn(signal);
+    await nominatimTurn(signal, true);
     const params = new URLSearchParams({
       q: phrase,
       format: 'jsonv2',

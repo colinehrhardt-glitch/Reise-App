@@ -598,11 +598,12 @@ async function translatePoints(points, from, to) {
   return { points: list, translated: done };
 }
 
-async function guideFor(lang, title, keys) {
+async function guideFor(lang, title, keys, failures) {
   try {
     return await readGuide(lang, title, keys);
   } catch (error) {
     if (error.code === 'offline') throw error;
+    failures.push(error);
     return null;
   }
 }
@@ -613,13 +614,15 @@ export async function fetchGuide(place, lang) {
     const links = place.wikidata ? await wikidataLinks(place.wikidata).catch(() => ({ voyage: {} })) : { voyage: {} };
     const keys = Object.keys(GUIDE_SECTIONS);
     const sources = [];
-    const local = await guideFor(lang, links.voyage[lang] || place.name, keys);
+    const failures = [];
+    const local = await guideFor(lang, links.voyage[lang] || place.name, keys, failures);
     if (local) sources.push(local);
     const missing = keys.filter((item) => !sources.some((source) => source.sections[item]));
     if (missing.length && lang !== 'en') {
-      const english = await guideFor('en', links.voyage.en || place.name, missing);
+      const english = await guideFor('en', links.voyage.en || place.name, missing, failures);
       if (english) sources.push(english);
     }
+    if (!sources.length && failures.length) throw failures[0];
     if (!sources.length) return null;
     const sections = {};
     for (const item of keys) {
