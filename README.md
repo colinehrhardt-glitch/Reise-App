@@ -1,6 +1,6 @@
 # Viaro
 
-Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte, Stufe 2: Transport und Routen-Planer, Stufe 3: Entdecken (Infos, Wetter, Sehenswürdigkeiten).
+Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterkünfte, Stufe 2: Transport und Routen-Planer, Stufe 3: Entdecken (Infos, Wetter, Sehenswürdigkeiten), Stufe 4: mehrere Reisen mit Export und Import.
 
 ## Funktionen
 - Vollbild-Karte (OSM-Daten, Vektorkarte von OpenFreeMap, Rückfall auf OSM-Kacheln); öffnet an der zuletzt angesehenen Stelle, der Standort wird nur auf Wunsch abgefragt
@@ -13,6 +13,8 @@ Reise-Web-App (Arbeitstitel) zum Planen von Reisen – Stufe 1: Karte und Unterk
 - Routen-Planer (Reiter „Route“): Reisebeginn, Start (eigener Standort oder eigener Ort), Orte hinzufügen, per Ziehen sortieren oder optimieren
 - Nächte pro Ort (auch am Startort) mit automatisch berechneten An- und Abreisetagen
 - Reiseplan Tag für Tag (Fahrten und Übernachtungen), Export in den Kalender (.ics) und Teilen als Text
+- Mehrere Reisen: Auswahl oben im Reiter „Route“ mit Name, Datum, Orten und Nächten; neue Reise, umbenennen, duplizieren, löschen (rückgängig machbar)
+- Export einer Reise als JSON-Datei (Route mit Nächten und Daten, Unterkünfte, Sehenswürdigkeiten, Favoriten, Einstellungen) – auf dem iPhone über das Teilen-Menü; Import fügt die Datei immer als neue Reise hinzu, ergänzt Favoriten und übernimmt Einstellungen nur auf Wunsch (am Computer auch per Hineinziehen)
 - „Automatisch wählen aus“: Verkehrsmittel für die automatische Auswahl ausschließen (z. B. keine Flüge); pro Etappe bleiben alle wählbar
 - Unterkunft pro Ort: „Unterkunft suchen“ lädt die Unterkünfte dort, im Popup „Für <Ort> merken“, Merkliste mit Auswahl, Haken „Keine Unterkunft nötig“, Warnhinweis bei Orten ohne Unterkunft; Booking.com-Links mit Check-in/Check-out
 - Routen als Pfeilketten in Reiserichtung; Flüge von Flughafen zu Flughafen (Großkreis), Bus und Bahn von Busbahnhof bzw. Bahnhof, Anfahrt als Punktlinie
@@ -44,6 +46,7 @@ Lokal: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` �
 - `js/map.js` – Karte, Marker, Popups
 - `js/api.js` – Abfragen an Nominatim, Overpass, Routing und Transitous (mit Cache)
 - `js/planner.js` – Routen-Planer
+- `js/trips.js` – mehrere Reisen, Export und Import
 - `js/overview.js` – Reiseplan, Kalender-Export, Teilen
 - `js/recent.js` – zuletzt gesuchte Orte
 - `js/discover.js` – Reiter „Entdecken“
@@ -62,7 +65,7 @@ Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap © OpenM
 MIT – siehe `LICENSE`.
 
 ## Offene Punkte für Stufe 5 (eigener Server)
-- **KI-Reiseplanung:** Vor der Reise fragt die App, welche Länder und Städte dabei sein sollen. Die KI schlägt daraus Routen, weitere Orte und Aktivitäten vor; alles bleibt danach von Hand änderbar. Die Länder-Auswahl gehört zu diesem Schritt (nicht in den Planer). Der Planer übernimmt das Ergebnis über `applyPlan({ startPlace, stops })` in `js/planner.js`. Schlüssel nur auf dem Server, nie im Frontend.
+- **KI-Reiseplanung:** Vor der Reise fragt die App, welche Länder und Städte dabei sein sollen. Die KI schlägt daraus Routen, weitere Orte und Aktivitäten vor; alles bleibt danach von Hand änderbar. Die Länder-Auswahl gehört zu diesem Schritt (nicht in den Planer). Das Ergebnis kommt als neue Reise im selben Format wie die Export-Datei (`js/trips.js`). Schlüssel nur auf dem Server, nie im Frontend.
 - **Ladezeit der Unterkünfte:** Der öffentliche Overpass-Server ist oft ausgelastet (Suchen dauern teils 10–20 s oder werden abgelehnt). Lösung: eigene, wöchentlich aktualisierte Kopie der OSM-Daten statt Live-Abfragen – entweder als fertige Datenpakete über GitHub (kostenlos) oder über den eigenen Server. Ein reiner Weiterleitungs-Server hilft nicht.
 - **Zusatz-Ebenen** (Geld, Einkaufen, Gesundheit, Essen) und die **Sehenswürdigkeiten** hängen ebenfalls am Overpass-Server und sollen mit umziehen.
 - **Echte Zusammenfassungen:** Die Kurzfassungen (Kurzinfo, Sicherheit, Tipps) wählen heute per Stichwort die wichtigsten Sätze aus. Mit der KI in Stufe 5 sollen daraus echte, kurze Zusammenfassungen werden – auch zur Sicherheit einzelner Viertel. Daten zur Kriminalität auf Stadtebene (z. B. Numbeo) gibt es nur gegen Lizenz.

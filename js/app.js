@@ -331,6 +331,67 @@ function setPoiLayer(category, checked) {
   if (checked) loadPoiLayer(category);
 }
 
+function tripExtras() {
+  return {
+    favorites: state.favorites,
+    settings: { lang: getLanguage(), theme: state.theme, layers: state.layers, showFavorites: state.showFavorites }
+  };
+}
+
+function mergeFavorites(raw) {
+  const incoming = sanitizeFavorites(raw);
+  const added = Object.keys(incoming).filter((id) => !state.favorites[id]);
+  if (!added.length) return 0;
+  for (const id of added) state.favorites[id] = incoming[id];
+  if (!persistFavorites()) {
+    for (const id of added) delete state.favorites[id];
+    return 0;
+  }
+  renderMarkers();
+  renderFavoritesList();
+  return added.length;
+}
+
+function cleanSettings(raw) {
+  return {
+    lang: LANGUAGES.some((language) => language.code === raw.lang) ? raw.lang : null,
+    theme: THEMES.includes(raw.theme) ? raw.theme : null,
+    layers: raw.layers && typeof raw.layers === 'object' ? sanitizeLayers(raw.layers) : null,
+    showFavorites: typeof raw.showFavorites === 'boolean' ? raw.showFavorites : null
+  };
+}
+
+function settingsDiffer(raw) {
+  const settings = cleanSettings(raw);
+  return Boolean((settings.lang && settings.lang !== getLanguage())
+    || (settings.theme && settings.theme !== state.theme)
+    || (settings.layers && Object.keys(settings.layers).some((key) => settings.layers[key] !== state.layers[key]))
+    || (settings.showFavorites !== null && settings.showFavorites !== state.showFavorites));
+}
+
+function applySettings(raw) {
+  const settings = cleanSettings(raw);
+  if (settings.theme && settings.theme !== state.theme) {
+    state.theme = settings.theme;
+    save('theme', settings.theme);
+    applyTheme();
+    renderThemeSwitch();
+  }
+  if (settings.layers) {
+    if (settings.layers.accommodation !== state.layers.accommodation) {
+      state.layers.accommodation = settings.layers.accommodation;
+      save('layers', state.layers);
+      applyStayLayers();
+    }
+    for (const category of POI_CATEGORIES) {
+      if (settings.layers[category] !== state.layers[category]) setPoiLayer(category, settings.layers[category]);
+    }
+  }
+  if (settings.showFavorites !== null && settings.showFavorites !== state.showFavorites) setShowFavorites(settings.showFavorites);
+  if (settings.lang && settings.lang !== getLanguage()) setLanguage(settings.lang);
+  toast(t('trips.settingsApplied'));
+}
+
 function beginRequest() {
   state.pending += 1;
   dom.progress.hidden = false;
@@ -1559,7 +1620,17 @@ function init() {
     onSightsChanged: () => {
       refreshSights();
       refreshOpenPopup();
-    }
+    },
+    onTripChange: () => {
+      mapView.closePopup();
+      renderDiscover();
+      refreshSights();
+      if (state.tab === 'discover') activateDiscover();
+    },
+    tripExtras,
+    mergeFavorites,
+    settingsDiffer,
+    applySettings
   });
   initDiscover(dom.discoverBody, {
     isActive: () => state.tab === 'discover',

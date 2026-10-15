@@ -1,15 +1,14 @@
 import { t, tCount, getLanguage, formatDistance } from './i18n.js';
-import { load, save } from './storage.js';
 import { searchPlaces, routeStreet, routeTransit, reverseGeocode, nearestAirport, nearbyStations, shortLabel } from './api.js';
 import * as mapView from './map.js';
 import { el, icon, distance, errorMessage, toast } from './ui.js';
 import { getRecent, addRecent } from './recent.js';
 import { buildIcs, downloadFile, shareText, overviewList } from './overview.js';
 import { SIGHT_TYPES } from './info.js';
+import { loadTrips, saveTrip, initTrips, renderTrips, activeTripName } from './trips.js';
 
 export const MODES = ['walk', 'car', 'bus', 'train', 'ferry', 'flight'];
 
-const STORAGE_KEY = 'route';
 const BRUTE_FORCE_LIMIT = 7;
 const DEFAULT_NIGHTS = 2;
 const MAX_NIGHTS = 90;
@@ -58,7 +57,8 @@ const state = {
   startEditing: false,
   overviewOpen: false,
   sightsOpen: null,
-  modesOpen: false
+  modesOpen: false,
+  tripRun: 0
 };
 let options = {};
 const dom = {};
@@ -136,33 +136,46 @@ function newId() {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function restore() {
-  const raw = load(STORAGE_KEY, null);
-  if (!raw || typeof raw !== 'object') return;
-  state.tripStart = validDate(raw.tripStart);
-  state.startMode = raw.startMode === 'custom' ? 'custom' : 'gps';
-  state.startPlace = raw.startPlace ? validStop({ nights: 0, ...raw.startPlace, id: 'start' }) : null;
-  state.stops = Array.isArray(raw.stops) ? raw.stops.map(validStop).filter(Boolean).slice(0, 40) : [];
-  state.avoid = Array.isArray(raw.avoid) ? MODES.filter((mode) => raw.avoid.includes(mode)) : [];
-  if (state.avoid.length === MODES.length) state.avoid = [];
-  state.stationChoice = {};
-  if (raw.stations && typeof raw.stations === 'object') {
-    for (const [key, value] of Object.entries(raw.stations)) {
+function sanitizeTrip(raw) {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const stations = {};
+  if (data.stations && typeof data.stations === 'object') {
+    for (const [key, value] of Object.entries(data.stations)) {
       if (key.length < 60 && value && typeof value.name === 'string' && Number.isFinite(value.lat) && Number.isFinite(value.lon)) {
-        state.stationChoice[key] = { name: value.name.slice(0, 80), lat: value.lat, lon: value.lon };
+        stations[key] = { name: value.name.slice(0, 80), lat: value.lat, lon: value.lon };
       }
     }
   }
-  state.modes = {};
-  if (raw.modes && typeof raw.modes === 'object') {
-    for (const [pair, mode] of Object.entries(raw.modes)) {
-      if (MODES.includes(mode) && pair.length < 100) state.modes[pair] = mode;
+  const modes = {};
+  if (data.modes && typeof data.modes === 'object') {
+    for (const [pair, mode] of Object.entries(data.modes)) {
+      if (MODES.includes(mode) && pair.length < 100) modes[pair] = mode;
     }
   }
+  const avoid = Array.isArray(data.avoid) ? MODES.filter((mode) => data.avoid.includes(mode)) : [];
+  return {
+    tripStart: validDate(data.tripStart),
+    startMode: data.startMode === 'custom' ? 'custom' : 'gps',
+    startPlace: data.startPlace ? validStop({ nights: 0, ...data.startPlace, id: 'start' }) : null,
+    stops: Array.isArray(data.stops) ? data.stops.map(validStop).filter(Boolean).slice(0, MAX_STOPS) : [],
+    modes,
+    avoid: avoid.length === MODES.length ? [] : avoid,
+    stations
+  };
 }
 
-function persist() {
-  const ok = save(STORAGE_KEY, {
+function applyTrip(data) {
+  state.tripStart = data.tripStart;
+  state.startMode = data.startMode;
+  state.startPlace = data.startPlace;
+  state.stops = data.stops;
+  state.modes = data.modes;
+  state.avoid = data.avoid;
+  state.stationChoice = data.stations;
+}
+
+function tripData() {
+  return {
     tripStart: state.tripStart,
     startMode: state.startMode,
     startPlace: state.startPlace,
@@ -170,8 +183,35 @@ function persist() {
     modes: state.modes,
     avoid: state.avoid,
     stations: state.stationChoice
-  });
-  if (!ok) toast(t('favorites.storageError'), { type: 'error', duration: 6000 });
+  };
+}
+
+function persist() {
+  if (!saveTrip(tripData())) toast(t('favorites.storageError'), { type: 'error', duration: 6000 });
+}
+
+function loadTrip(raw) {
+  applyTrip(sanitizeTrip(raw));
+  state.tripRun += 1;
+  state.auto = {};
+  state.picker = null;
+  state.expanded = null;
+  state.stayOpen = null;
+  state.stayTarget = null;
+  state.sightsOpen = null;
+  state.overviewOpen = false;
+  state.startEditing = false;
+  state.modesOpen = false;
+  dom.startView = null;
+  renderStart();
+  compute();
+  fitRoute();
+  if (options.onTripChange) options.onTripChange();
+}
+
+function validTrip(raw) {
+  const data = sanitizeTrip(raw);
+  return data.stops.length || data.startPlace ? data : null;
 }
 
 function startPoint() {
@@ -1613,7 +1653,9 @@ function tripEvents() {
 
 function tripName() {
   const list = points();
-  if (!list.length) return t('route.title');
+  if (!list.length) return activeTripName() || t('route.title');
+  const custom = activeTripName();
+  if (custom) return custom;
   const name = (point) => point.linkName || point.name;
   if (list.length === 1) return name(list[0]);
   return t('route.calendarName', { from: name(list[0]), to: name(list[list.length - 1]) });
@@ -1744,6 +1786,7 @@ function removeStop(id) {
   const index = state.stops.findIndex((stop) => stop.id === id);
   if (index < 0) return;
   const [removed] = state.stops.splice(index, 1);
+  const run = state.tripRun;
   state.expanded = null;
   state.picker = null;
   persist();
@@ -1753,7 +1796,7 @@ function removeStop(id) {
     action: {
       label: t('favorites.undo'),
       onClick: () => {
-        if (state.stops.some((stop) => stop.id === removed.id)) return;
+        if (run !== state.tripRun || state.stops.some((stop) => stop.id === removed.id)) return;
         state.stops.splice(Math.min(index, state.stops.length), 0, removed);
         persist();
         compute();
@@ -1778,19 +1821,6 @@ export function addStop(place) {
   persist();
   compute();
   return true;
-}
-
-export function applyPlan({ startPlace = null, stops = [] } = {}) {
-  if (startPlace) {
-    state.startMode = 'custom';
-    state.startPlace = validStop({ nights: 0, ...startPlace, id: 'start' });
-  }
-  state.stops = stops.map((stop) => validStop({ ...stop, id: newId() })).filter(Boolean);
-  state.modes = {};
-  state.auto = {};
-  persist();
-  update();
-  fitRoute();
 }
 
 function routeLength(order, start) {
@@ -1879,6 +1909,7 @@ function optimize() {
 
 function clearRoute() {
   const previous = { stops: state.stops, modes: state.modes, auto: state.auto };
+  const run = state.tripRun;
   let undone = false;
   state.stops = [];
   state.modes = {};
@@ -1892,7 +1923,7 @@ function clearRoute() {
     action: {
       label: t('favorites.undo'),
       onClick: () => {
-        if (undone) return;
+        if (undone || run !== state.tripRun) return;
         undone = true;
         const added = state.stops.filter((stop) => !previous.stops.some((item) => item.id === stop.id));
         state.stops = [...previous.stops, ...added].slice(0, MAX_STOPS);
@@ -1973,7 +2004,8 @@ function initDrag() {
 
 export function initPlanner(container, opts) {
   options = opts;
-  restore();
+  applyTrip(sanitizeTrip(loadTrips()));
+  dom.trips = el('section', { class: 'planner-section trips' });
   dom.trip = el('section', { class: 'planner-section' });
   dom.start = el('section', { class: 'planner-section' });
   dom.list = el('ol', { class: 'route-list' });
@@ -1986,6 +2018,7 @@ export function initPlanner(container, opts) {
   dom.actions = el('div', { class: 'route-actions' }, dom.overviewBtn, dom.optimize, dom.clear);
   dom.root = container;
   container.replaceChildren(el('div', { class: 'planner' },
+    dom.trips,
     dom.trip,
     dom.start,
     el('section', { class: 'planner-section planner-section--route' }, dom.list, dom.empty),
@@ -1993,6 +2026,16 @@ export function initPlanner(container, opts) {
     dom.add,
     dom.actions));
   initDrag();
+  initTrips(dom.trips, {
+    load: loadTrip,
+    validate: validTrip,
+    extras: () => (options.tripExtras ? options.tripExtras() : {}),
+    mergeFavorites: (raw) => (options.mergeFavorites ? options.mergeFavorites(raw) : 0),
+    settingsDiffer: (raw) => Boolean(options.settingsDiffer && options.settingsDiffer(raw)),
+    applySettings: (raw) => options.applySettings && options.applySettings(raw),
+    onRename: () => renderOverview(),
+    dropTarget: container
+  });
   mapView.setRouteHandlers({
     onLegClick: (index) => {
       const leg = legs()[index];
@@ -2021,6 +2064,7 @@ export function initPlanner(container, opts) {
 }
 
 export function renderPlanner() {
+  renderTrips();
   renderStart();
   dom.add.replaceChildren(
     el('div', { class: 'planner-label' }, el('span', { text: t('route.addStop') })),

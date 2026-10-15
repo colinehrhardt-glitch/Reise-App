@@ -1,4 +1,4 @@
-const VERSION = 'viaro-v8';
+const VERSION = 'viaro-v9';
 const SHELL = [
   './',
   'index.html',
@@ -14,6 +14,7 @@ const SHELL = [
   'js/planner.js',
   'js/recent.js',
   'js/storage.js',
+  'js/trips.js',
   'js/ui.js',
   'data/airports.json',
   'icons/icon-192.png',
