@@ -57,7 +57,8 @@ const state = {
   dragging: false,
   startEditing: false,
   overviewOpen: false,
-  sightsOpen: null
+  sightsOpen: null,
+  modesOpen: false
 };
 let options = {};
 const dom = {};
@@ -1441,8 +1442,24 @@ function toggleAvoid(mode) {
 }
 
 function modeToggles() {
+  const allowed = MODES.length - state.avoid.length;
+  const head = el('button', {
+    type: 'button',
+    class: 'planner-label planner-label--sub planner-toggle',
+    'aria-expanded': String(state.modesOpen),
+    onclick: () => {
+      state.modesOpen = !state.modesOpen;
+      renderTrip();
+      const next = dom.trip.querySelector('.planner-toggle');
+      if (next) next.focus({ preventScroll: true });
+    }
+  },
+  el('span', { text: t('route.autoModes') }),
+  el('span', { class: 'planner-toggle__value', text: state.avoid.length ? t('route.modesSome', { n: allowed, total: MODES.length }) : t('route.modesAll') }),
+  icon('chevron'));
+  if (!state.modesOpen) return [head];
   return [
-    el('div', { class: 'planner-label planner-label--sub' }, el('span', { text: t('route.autoModes') })),
+    head,
     el('div', { class: 'mode-toggles', role: 'group', 'aria-label': t('route.autoModes') }, MODES.map((mode) => {
       const allowed = !state.avoid.includes(mode);
       return el('button', {
@@ -1460,6 +1477,11 @@ function modeToggles() {
 }
 
 function renderTrip() {
+  dom.trip.hidden = !state.stops.length;
+  if (!state.stops.length) {
+    dom.trip.replaceChildren();
+    return;
+  }
   const input = el('input', { type: 'date', class: 'date-input', 'aria-label': t('route.tripStart') });
   input.value = state.tripStart || '';
   input.addEventListener('change', () => {
@@ -1476,7 +1498,7 @@ function renderTrip() {
       input,
       base && nights ? el('span', { class: 'trip-row__end', text: t('route.tripEnd', { date: formatDay(addDays(base, nights), true) }) }) : null),
     missing ? el('p', { class: 'trip-warning' }, icon('alert'), el('span', { text: tCount('route.missingStays', missing) })) : null,
-    ...(state.stops.length ? modeToggles() : [])
+    ...modeToggles()
   ].filter(Boolean));
 }
 
@@ -1663,14 +1685,12 @@ function editingField() {
 function renderList() {
   if (state.dragging) return;
   const field = editingField();
-  if (field) {
-    if (!field.dataset.pending) {
-      field.dataset.pending = '1';
-      field.addEventListener('blur', () => setTimeout(renderList, 0), { once: true });
-    }
-    return;
+  if (field && !field.dataset.pending) {
+    field.dataset.pending = '1';
+    field.addEventListener('blur', () => setTimeout(renderList, 0), { once: true });
   }
-  renderTrip();
+  if (field && !dom.trip.contains(field)) return;
+  if (!field) renderTrip();
   const list = points();
   const legList = legs();
   const plans = schedule();

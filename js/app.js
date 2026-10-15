@@ -285,7 +285,7 @@ function renderLayersPanel() {
       onChange: (checked) => {
         state.layers.accommodation = checked;
         save('layers', state.layers);
-        mapView.setAccommodationsVisible(checked);
+        applyStayLayers();
       }
     }),
     layerRow({
@@ -615,6 +615,12 @@ function renderSightLayer() {
   mapView.renderPoiLayer('sights', state.sights, state.tab === 'discover');
 }
 
+function applyStayLayers() {
+  const discover = state.tab === 'discover';
+  mapView.setAccommodationsVisible(state.layers.accommodation && !discover);
+  mapView.setFavoritesVisible(!discover);
+}
+
 function setTab(tab, { fit = true } = {}) {
   const changed = state.tab !== tab;
   state.tab = tab;
@@ -635,6 +641,7 @@ function setTab(tab, { fit = true } = {}) {
   dom.sheet.dataset.tab = tab;
   applyHeader();
   renderSightLayer();
+  applyStayLayers();
   if (!wideQuery.matches && state.sheet === 'peek' && (route || discover)) setSheet('half');
   else setSheet(state.sheet, false);
   if (route && changed && fit) fitRoute();
@@ -1536,7 +1543,7 @@ function init() {
       state.popupItem = null;
     }
   });
-  mapView.setAccommodationsVisible(state.layers.accommodation);
+  applyStayLayers();
   initPlanner(dom.routeBody, {
     getUser: () => state.user,
     requestLocation,

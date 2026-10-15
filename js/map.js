@@ -210,6 +210,7 @@ export function initMap(container, options = {}) {
   map.on('popupclose', (event) => {
     if (event.popup === popup) {
       popup = null;
+      document.body.classList.remove('has-popup');
       handlers.onPopupClose?.();
     }
   });
@@ -501,6 +502,11 @@ export function renderResults(places, isFavorite) {
   if (!accommodationsVisible && map.hasLayer(cluster)) map.removeLayer(cluster);
 }
 
+export function setFavoritesVisible(visible) {
+  if (visible && !map.hasLayer(favoritesLayer)) map.addLayer(favoritesLayer);
+  if (!visible && map.hasLayer(favoritesLayer)) map.removeLayer(favoritesLayer);
+}
+
 export function renderFavorites(places) {
   const keep = new Set(places.map((place) => place.id));
   for (const [id, entry] of favoriteMarkers) {
@@ -572,6 +578,7 @@ export function openPopup(item, content) {
   if (popup) map.closePopup(popup);
   popup = next;
   next.openOn(map);
+  document.body.classList.add('has-popup');
   return next;
 }
 

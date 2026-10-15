@@ -94,7 +94,7 @@ function current(place, lang) {
 }
 
 export function discoverTitle() {
-  return state.place ? t('discover.titleIn', { place: state.place.name }) : t('discover.title');
+  return state.place ? state.place.name : t('discover.title');
 }
 
 export function discoverSubtitle() {
@@ -293,7 +293,7 @@ function cardNode(card) {
     }
   },
   el('span', { class: 'discover-card__icon', 'aria-hidden': 'true' }, icon(CARD_ICONS[card])),
-  el('span', { class: 'discover-card__title', text: card === 'safety' || card === 'tips' ? t(`discover.${card}In`, { place: state.place.name }) : t(`discover.${card}`) }),
+  el('span', { class: 'discover-card__title', text: t(`discover.${card}`) }),
   icon('chevron'));
   return el('section', { class: `discover-card${open ? ' is-open' : ''}`, 'data-card': card },
     header,
